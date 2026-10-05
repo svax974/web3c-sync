@@ -21,6 +21,11 @@ public enum SyncError: Error, Equatable, Sendable {
     /// Document déchiffré mais `HMAC(K_id, collection, k) != docId` reçu.
     case integrity
     case invalid(String)
+    /// Retour en arrière détecté : curseur `changes` qui diminue, ou compteur `c` d'un document inférieur au plancher
+    /// connu (`counterFloor`). Seul un serveur malveillant ou défaillant peut le provoquer.
+    case rollback
+    /// Document déchiffré sans compteur `c` entier >= 1 (protocole révisé, pas de compatibilité ascendante).
+    case missingCounter
     case transport(String)
 }
 

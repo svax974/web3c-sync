@@ -263,9 +263,102 @@ final class IntegrationTests: XCTestCase {
         do { _ = try await b.getBlob(id: "seg-1"); XCTFail() } catch { XCTAssertEqual(error as? SyncError, .notFound) }
     }
 
+    func testDeletionMarkerRoundTrip() async throws {
+        let (a, b, _) = try await pair()
+        let s1 = try await a.putDoc(collection: "favorites", logicalId: "f1", payload: ["x": 1], updatedAt: 10, counter: 1, ifMatch: 0)
+        let s2 = try await a.putMarker(collection: "favorites", logicalId: "f1", updatedAt: 20, counter: 2, ifMatch: s1)
+        XCTAssertEqual(s2, 2)
+        let d = try await b.getDoc(collection: "favorites", logicalId: "f1")
+        XCTAssertTrue(d.deleted)
+        XCTAssertEqual(d.counter, 2)
+        XCTAssertEqual(d.updatedAt, 20)
+        XCTAssertEqual(d.payload, .null)
+        let page = try await b.changesAll(since: 0)
+        XCTAssertEqual(page.items.count, 1)
+        XCTAssertTrue(page.items[0].deleted)
+        XCTAssertTrue(page.tombstones.isEmpty)       // marqueur authentifié, pas tombstone serveur
+        // upsert plus ancien que le marqueur : pas de résurrection
+        let old = try await b.upsert(collection: "favorites", logicalId: "f1", local: Candidate(payload: ["x": 2], updatedAt: 15))
+        XCTAssertFalse(old.wrote)
+        // upsert plus récent : recrée avec c = 3
+        let r = try await b.upsert(collection: "favorites", logicalId: "f1", local: Candidate(payload: ["x": 3], updatedAt: 30))
+        XCTAssertTrue(r.wrote)
+        XCTAssertEqual(r.counter, 3)
+        let d2 = try await a.getDoc(collection: "favorites", logicalId: "f1")
+        XCTAssertFalse(d2.deleted)
+        XCTAssertEqual(d2.counter, 3)
+        XCTAssertEqual(d2.payload, ["x": 3])
+    }
+
+    func testUpsertCounterIsMaxPlusOne() async throws {
+        let (a, b, _) = try await pair()
+        let r1 = try await a.upsert(collection: "progress", logicalId: "k", local: Candidate(payload: 1, updatedAt: 1))
+        XCTAssertEqual(r1.counter, 1)
+        let r2 = try await b.upsert(collection: "progress", logicalId: "k", local: Candidate(payload: 2, updatedAt: 2))
+        XCTAssertEqual(r2.counter, 2)
+        let r3 = try await a.upsert(collection: "progress", logicalId: "k", local: Candidate(payload: 3, updatedAt: 3), counter: 10)
+        XCTAssertEqual(r3.counter, 11)
+        let d = try await b.getDoc(collection: "progress", logicalId: "k")
+        XCTAssertEqual(d.counter, 11)
+    }
+
+    func testCounterFloorAgainstRealServer() async throws {
+        let key = DeviceKey()
+        let owner = newClient(key)
+        let creds = try await owner.createGroup()
+        try await owner.putDoc(collection: "progress", logicalId: "k", payload: 1, updatedAt: 1, counter: 2, ifMatch: 0)
+        let guarded = Web3CSyncClient(baseURL: base, instance: instance, deviceKey: key, groupId: creds.groupId,
+                                      groupKey: creds.groupKey, counterFloor: { _, _ in 5 })
+        do { _ = try await guarded.getDoc(collection: "progress", logicalId: "k"); XCTFail() }
+        catch { XCTAssertEqual(error as? SyncError, .rollback) }
+        let page = try await guarded.changesAll(since: 0)
+        XCTAssertTrue(page.items.isEmpty)
+        XCTAssertEqual(page.rejected.map(\.error), [.rollback])
+        let lenient = Web3CSyncClient(baseURL: base, instance: instance, deviceKey: key, groupId: creds.groupId,
+                                      groupKey: creds.groupKey, counterFloor: { _, _ in 2 })
+        let ok = try await lenient.getDoc(collection: "progress", logicalId: "k")
+        XCTAssertEqual(ok.counter, 2)
+    }
+
+    func testCursorNoFalsePositiveAgainstRealServer() async throws {
+        let (a, b, _) = try await pair()
+        try await a.putDoc(collection: "progress", logicalId: "k", payload: 1, updatedAt: 1, ifMatch: 0)
+        let ok = try await b.changes(since: 1)
+        XCTAssertEqual(ok.next, 1)
+        // Le serveur de référence renvoie next >= since : jamais de faux positif. La détection du recul
+        // (next < since) est couverte par HardeningTests.testCursorRollback (transport factice).
+        let far = try await b.changes(since: 99)
+        XCTAssertEqual(far.next, 99)
+    }
+
+    func testVoteOlderThanStoredIs409() async throws {
+        let now = Int64(Date().timeIntervalSince1970)
+        let t = Box<Int64>(now)
+        let c = CommunityClient(baseURL: base, powBits: 8, clock: { Date(timeIntervalSince1970: Double(t.value)) })
+        let k = Web3CCrypto.deriveKeys(try GroupLink.generateGroupKey()).rating
+        try await c.vote(contentKey: "movie:tmdb:42", profileId: "p", kUser: k, rating: 9)
+        // même t : refusé (pas strictement postérieur)
+        do { try await c.vote(contentKey: "movie:tmdb:42", profileId: "p", kUser: k, rating: 1); XCTFail() }
+        catch { guard case .conflict = error as? SyncError else { return XCTFail("\(error)") } }
+        // plus ancien : refusé
+        t.value = now - 30
+        do { try await c.vote(contentKey: "movie:tmdb:42", profileId: "p", kUser: k, rating: 1); XCTFail() }
+        catch { guard case .conflict = error as? SyncError else { return XCTFail("\(error)") } }
+        // plus récent : accepté
+        t.value = now + 30
+        try await c.vote(contentKey: "movie:tmdb:42", profileId: "p", kUser: k, rating: 3)
+        let agg = try await c.get(contentKey: "movie:tmdb:42")
+        XCTAssertEqual(agg.sum, 3, accuracy: 1e-9)
+        // t hors fenêtre de 10 min : 400
+        t.value = now + 3600
+        do { try await c.vote(contentKey: "movie:tmdb:42", profileId: "p", kUser: k, rating: 3); XCTFail() }
+        catch { XCTAssertEqual(error as? SyncError, .badRequest) }
+    }
+
     func testCommunityRatings() async throws {
-        let c = CommunityClient(baseURL: base, powBits: 8)
-        let kUser = try GroupLink.generateGroupKey()
+        let tick = Box<Int64>(Int64(Date().timeIntervalSince1970) - 120)
+        let c = CommunityClient(baseURL: base, powBits: 8, clock: { Date(timeIntervalSince1970: Double(tick.next())) })
+        let kUser = Web3CCrypto.deriveKeys(try GroupLink.generateGroupKey()).rating
         try await c.vote(contentKey: "movie:tmdb:603", profileId: "p1", kUser: kUser, rating: 7.5)
         try await c.vote(contentKey: "movie:tmdb:603", profileId: "p2", kUser: kUser, rating: 8)
         var agg = try await c.get(contentKey: "movie:tmdb:603")
@@ -284,7 +377,7 @@ final class IntegrationTests: XCTestCase {
         // note hors bornes refusée, PoW insuffisant refusé
         do { try await c.vote(contentKey: "movie:tmdb:603", profileId: "p1", kUser: kUser, rating: 11); XCTFail() }
         catch { XCTAssertEqual(error as? SyncError, .badRequest) }
-        let weak = CommunityClient(baseURL: base, powBits: 0)
+        let weak = CommunityClient(baseURL: base, powBits: 0, clock: { Date(timeIntervalSince1970: Double(tick.next())) })
         var rejected = false
         for i in 0..<20 where !rejected {
             do { try await weak.vote(contentKey: "movie:tmdb:9", profileId: "w\(i)", kUser: kUser, rating: 5) }
@@ -292,6 +385,10 @@ final class IntegrationTests: XCTestCase {
         }
         XCTAssertTrue(rejected, "un PoW à 0 bit devrait être refusé par un serveur à 8 bits")
     }
+}
+
+extension Box where T == Int64 {
+    func next() -> Int64 { value += 1; return value }
 }
 
 final class Counter: @unchecked Sendable {

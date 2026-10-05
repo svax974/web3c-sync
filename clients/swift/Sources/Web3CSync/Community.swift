@@ -12,10 +12,17 @@ public final class CommunityClient: Sendable {
     public let powBits: Int
     private let transport: Web3CTransport
     private let baseString: String
+    private let configError: SyncError?
+    private let clock: @Sendable () -> Date
 
-    public init(baseURL: URL, powBits: Int = 16, tlsFingerprint: String? = nil, transport: Web3CTransport? = nil) {
+    /// `clock` : horloge injectable (instant `t` des votes). `http://` refusé hors loopback ; empreinte TLS non vide
+    /// mais invalide : toute requête échoue (`SyncError.invalid`).
+    public init(baseURL: URL, powBits: Int = 16, tlsFingerprint: String? = nil, transport: Web3CTransport? = nil,
+                clock: @escaping @Sendable () -> Date = { Date() }) {
         self.baseURL = baseURL
         self.powBits = powBits
+        self.clock = clock
+        self.configError = validateEndpoint(baseURL, tlsFingerprint: tlsFingerprint)
         self.transport = transport ?? URLSessionTransport(tlsFingerprint: tlsFingerprint)
         var s = baseURL.absoluteString
         while s.hasSuffix("/") { s.removeLast() }
@@ -23,6 +30,7 @@ public final class CommunityClient: Sendable {
     }
 
     private func request(_ method: String, _ path: String, body: Data? = nil) throws -> URLRequest {
+        if let e = configError { throw e }
         guard let url = URL(string: baseString + path) else { throw SyncError.invalid("bad url") }
         var r = URLRequest(url: url)
         r.httpMethod = method
@@ -46,13 +54,25 @@ public final class CommunityClient: Sendable {
         }
     }
 
-    /// Vote (`rating` nil = retrait). `kUser` : K_id du groupe du profil, sinon clé locale aléatoire de l'appareil.
+    /// `^(movie|tv|series):tmdb:[0-9]{1,9}$`
+    static func validVoteKey(_ k: String) -> Bool {
+        let parts = k.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, ["movie", "tv", "series"].contains(String(parts[0])), parts[1] == "tmdb" else { return false }
+        let id = parts[2].utf8
+        return (1...9).contains(id.count) && id.allSatisfy { $0 >= 0x30 && $0 <= 0x39 }
+    }
+
+    /// Vote (`rating` nil = retrait). `kUser` : `K_rating` du groupe du profil (`DerivedKeys.rating`), sinon clé locale
+    /// aléatoire de l'appareil. Le corps porte `t` (secondes, horloge injectée), lié à la preuve de travail : le serveur
+    /// refuse (409 -> `SyncError.conflict`) un vote dont `t` n'est pas strictement postérieur au précédent du même
+    /// pseudonyme, et (400) un `t` à plus de 10 min de son horloge.
     public func vote(contentKey: String, profileId: String, kUser: Data, rating: Double?) async throws {
-        guard Self.validKey(contentKey) else { throw SyncError.invalid("bad content key") }
+        guard Self.validVoteKey(contentKey) else { throw SyncError.invalid("bad content key") }
         if let r = rating, !r.isFinite { throw SyncError.invalid("bad rating") }
         let p = Web3CCrypto.pseudonym(kUser: kUser, profileId: profileId, contentKey: contentKey)
-        let n = try await Web3CCrypto.solvePowAsync(contentKey: contentKey, pseudonym: p, rating: rating, powBits: powBits)
-        let body = Data("{\"p\":\"\(p)\",\"r\":\(Web3CCrypto.ratingText(rating)),\"n\":\(n)}".utf8)
+        let t = Int64(clock().timeIntervalSince1970)
+        let n = try await Web3CCrypto.solvePowAsync(contentKey: contentKey, pseudonym: p, rating: rating, t: t, powBits: powBits)
+        let body = Data("{\"p\":\"\(p)\",\"r\":\(Web3CCrypto.ratingText(rating)),\"t\":\(t),\"n\":\(n)}".utf8)
         _ = try await run(try request("PUT", "/v1/public/ratings/\(contentKey)", body: body))
     }
 

@@ -17,10 +17,37 @@ public func normalizeFingerprint(_ s: String) -> String? {
     return nil
 }
 
-final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+/// Vérifie la configuration réseau commune aux clients : `https://` obligatoire sauf hôte loopback (127.0.0.1, ::1,
+/// localhost) ; une empreinte TLS non vide mais invalide est une erreur (fail-closed, jamais d'épinglage désactivé en silence).
+func validateEndpoint(_ url: URL, tlsFingerprint: String?) -> SyncError? {
+    switch url.scheme?.lowercased() {
+    case "https": break
+    case "http":
+        var host = (url.host ?? "").lowercased()
+        if host.hasPrefix("[") && host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        guard host == "127.0.0.1" || host == "::1" || host == "localhost" else {
+            return .invalid("http:// refused outside loopback")
+        }
+    default:
+        return .invalid("unsupported url scheme")
+    }
+    if let f = tlsFingerprint, !f.isEmpty, normalizeFingerprint(f) == nil {
+        return .invalid("invalid TLS fingerprint")
+    }
+    return nil
+}
+
+final class PinningDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     let expected: String?
 
     init(expected: String?) { self.expected = expected }
+
+    /// Les redirections ne sont jamais suivies : elles rejouent des en-têtes signés (et le jeton admin) vers un autre
+    /// hôte. La réponse 3xx est rendue telle quelle (-> `SyncError.server`).
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
@@ -47,19 +74,27 @@ final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
 /// Transport URLSession, avec épinglage optionnel du certificat par empreinte SHA-256 (DER).
 public final class URLSessionTransport: Web3CTransport, @unchecked Sendable {
     private let session: URLSession
+    private let configError: SyncError?
 
+    /// Une empreinte non vide mais invalide ne désactive PAS l'épinglage : toute requête échoue avec `SyncError.invalid`.
     public init(tlsFingerprint: String? = nil) {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 30
         cfg.httpCookieStorage = nil
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         let expected = tlsFingerprint.flatMap(normalizeFingerprint)
+        if let f = tlsFingerprint, !f.isEmpty, expected == nil {
+            configError = .invalid("invalid TLS fingerprint")
+        } else {
+            configError = nil
+        }
         session = URLSession(configuration: cfg, delegate: PinningDelegate(expected: expected), delegateQueue: nil)
     }
 
     deinit { session.finishTasksAndInvalidate() }
 
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if let e = configError { throw e }
         do {
             let (d, r) = try await session.data(for: request)
             guard let h = r as? HTTPURLResponse else { throw SyncError.transport("not an HTTP response") }
@@ -71,6 +106,7 @@ public final class URLSessionTransport: Web3CTransport, @unchecked Sendable {
     }
 
     public func lines(for request: URLRequest) async throws -> (HTTPURLResponse, AsyncThrowingStream<String, Error>) {
+        if let e = configError { throw e }
         let (bytes, r) = try await session.bytes(for: request)
         guard let h = r as? HTTPURLResponse else { throw SyncError.transport("not an HTTP response") }
         let stream = AsyncThrowingStream<String, Error> { cont in

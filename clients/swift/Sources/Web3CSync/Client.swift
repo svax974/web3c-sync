@@ -38,8 +38,14 @@ public struct SyncDocument: Sendable, Equatable {
     public let logicalId: String
     public let docId: String
     public let payload: JSONValue
-    /// `u` interne (epoch ms).
+    /// `u` interne (epoch ms), ramené à `now + 5 min` s'il est au-delà (une horloge en avance ne gagne pas, §3).
     public let updatedAt: Int64
+    /// `u` brut tel qu'écrit par l'appareil (avant clamp).
+    public let rawUpdatedAt: Int64
+    /// Compteur par document `c` (>= 1), strictement croissant (§3).
+    public let counter: Int64
+    /// Vrai si le plaintext est un marqueur de suppression authentifié (`del:true`) ; `payload` vaut alors `.null`.
+    public let deleted: Bool
     public let seq: Int64
     /// Horodatage de transport serveur (epoch s), 0 si inconnu.
     public let serverUpdatedAt: Int64
@@ -51,6 +57,9 @@ public struct Tombstone: Sendable, Equatable {
     public let seq: Int64
     /// Instant serveur de la suppression, secondes Unix (0 si inconnu).
     public let updatedAt: Int64
+    /// Un tombstone créé par le serveur n'est PAS authentifié (§3, §7) : les moteurs doivent l'ignorer. Seul un marqueur
+    /// `del` déchiffré (`SyncDocument.deleted`) supprime un élément local.
+    public var isAuthenticated: Bool { false }
 }
 
 /// Élément de `changes` rejeté (déchiffrement ou vérification d'identifiant impossible).
@@ -58,6 +67,8 @@ public struct RejectedChange: Sendable, Equatable {
     public let collection: String
     public let docId: String
     public let seq: Int64
+    /// Cause du rejet (`.rollback`, `.missingCounter`, `.decryption`, `.integrity`...), nil si inconnue.
+    public var error: SyncError? = nil
 }
 
 public struct ChangesPage: Sendable, Equatable {
@@ -88,6 +99,8 @@ public struct UpsertResult: Sendable, Equatable {
     public let payload: JSONValue
     public let updatedAt: Int64
     public let seq: Int64
+    /// Compteur `c` écrit (ou celui du document distant si rien n'a été écrit).
+    public let counter: Int64
     /// false si `merge` a renvoyé nil (rien à écrire) : `seq` est alors celui du document distant.
     public let wrote: Bool
 }
@@ -107,9 +120,22 @@ public actor Web3CSyncClient {
     private var keys: DerivedKeys?
     private let basePath: String
     private let baseString: String
+    private let configError: SyncError?
+    private let counterFloor: (@Sendable (String, String) -> Int64?)?
+    private let clock: @Sendable () -> Date
 
+    /// - `counterFloor` : (collection, docId) -> plus grand `c` déjà vu ; tout document reçu dont `c` est inférieur est
+    ///   rejeté (`SyncError.rollback`, anti-rollback §3).
+    /// - `clock` : horloge injectable (clamp de `u`).
+    /// - `http://` hors loopback, ou empreinte TLS non vide mais invalide : l'init ne lève pas, mais toute requête
+    ///   échoue avec `SyncError.invalid` (fail-closed).
     public init(baseURL: URL, instance: String, deviceKey: DeviceKey, groupId: String? = nil, groupKey: Data? = nil,
-                adminToken: String? = nil, tlsFingerprint: String? = nil, transport: Web3CTransport? = nil) {
+                adminToken: String? = nil, tlsFingerprint: String? = nil, transport: Web3CTransport? = nil,
+                counterFloor: (@Sendable (String, String) -> Int64?)? = nil,
+                clock: @escaping @Sendable () -> Date = { Date() }) {
+        self.counterFloor = counterFloor
+        self.clock = clock
+        self.configError = validateEndpoint(baseURL, tlsFingerprint: tlsFingerprint)
         self.baseURL = baseURL
         self.instance = instance
         self.deviceKey = deviceKey
@@ -128,10 +154,14 @@ public actor Web3CSyncClient {
     }
 
     /// Client prêt à appairer (`join`) à partir d'un lien.
-    public init(link: GroupLink, deviceKey: DeviceKey, transport: Web3CTransport? = nil) throws {
+    public init(link: GroupLink, deviceKey: DeviceKey, transport: Web3CTransport? = nil,
+                counterFloor: (@Sendable (String, String) -> Int64?)? = nil,
+                clock: @escaping @Sendable () -> Date = { Date() }) throws {
         guard let url = URL(string: link.serverURL) else { throw SyncError.invalid("bad server url") }
+        if let e = validateEndpoint(url, tlsFingerprint: link.tlsFingerprint) { throw e }
         self.init(baseURL: url, instance: link.instance, deviceKey: deviceKey, groupId: link.groupId,
-                  groupKey: link.groupKey, tlsFingerprint: link.tlsFingerprint, transport: transport)
+                  groupKey: link.groupKey, tlsFingerprint: link.tlsFingerprint, transport: transport,
+                  counterFloor: counterFloor, clock: clock)
     }
 
     public nonisolated var devicePublicKeyB64: String { deviceKey.publicKeyB64 }
@@ -140,6 +170,7 @@ public actor Web3CSyncClient {
 
     private func buildRequest(method: String, pathQuery: String, body: Data?, contentType: String?,
                               headers: [String: String] = [:], timeout: TimeInterval? = nil) throws -> URLRequest {
+        if let e = configError { throw e }
         guard let url = URL(string: baseString + pathQuery) else { throw SyncError.invalid("bad url") }
         let ts = String(Int64(Date().timeIntervalSince1970))
         let nonce = B64.encode(try Randomness.bytes(16))
@@ -278,31 +309,91 @@ public actor Web3CSyncClient {
 
     // MARK: Documents
 
-    private struct Plain: Codable {
+    struct Plain: Codable {
         var v: Int
         var u: Int64
+        var c: Int64?
         var k: String
-        var d: JSONValue
+        var d: JSONValue?
+        var del: Bool?
+
+        enum CodingKeys: String, CodingKey { case v, u, c, k, d, del }
+
+        init(v: Int, u: Int64, c: Int64?, k: String, d: JSONValue?, del: Bool?) {
+            self.v = v; self.u = u; self.c = c; self.k = k; self.d = d; self.del = del
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            v = try c.decode(Int.self, forKey: .v)
+            u = try c.decode(Int64.self, forKey: .u)
+            self.c = try c.decodeIfPresent(Int64.self, forKey: .c)
+            k = try c.decode(String.self, forKey: .k)
+            // `d: null` est une charge utile valide ; `d` absent ne l'est pas (sauf marqueur `del`).
+            // (JSONValue est ExpressibleByNilLiteral : ne pas écrire `cond ? x : nil`, qui produirait `.some(.null)`.)
+            if c.contains(.d) { d = .some(try c.decode(JSONValue.self, forKey: .d)) } else { d = Optional<JSONValue>.none }
+            del = try c.decodeIfPresent(Bool.self, forKey: .del)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(v, forKey: .v)
+            try c.encode(u, forKey: .u)
+            try c.encodeIfPresent(self.c, forKey: .c)
+            try c.encode(k, forKey: .k)
+            try c.encodeIfPresent(d, forKey: .d)
+            try c.encodeIfPresent(del, forKey: .del)
+        }
     }
 
-    private static func encoder() -> JSONEncoder {
+    static func encoder() -> JSONEncoder {
         let e = JSONEncoder()
         e.outputFormatting = [.withoutEscapingSlashes]
         return e
     }
 
-    /// Chiffre et écrit un document. `ifMatch` : 0 pour une création, sinon le `seq` de base. Retourne le nouveau `seq`.
-    @discardableResult
-    public func putDoc(collection: String, logicalId: String, payload: JSONValue, updatedAt: Int64, ifMatch: Int64) async throws -> Int64 {
+    private func nowMs() -> Int64 { Int64(clock().timeIntervalSince1970 * 1000) }
+
+    private func write(collection: String, logicalId: String, plain: Plain, ifMatch: Int64) async throws -> Int64 {
         let (gid, k) = try requireGroup()
         let docId = Web3CCrypto.docId(kId: k.id, collection: collection, logicalId: logicalId)
-        let plain = try Self.encoder().encode(Plain(v: 1, u: updatedAt, k: logicalId, d: payload))
+        let data = try Self.encoder().encode(plain)
         let aad = Web3CCrypto.aad(instance: instance, groupId: gid, collection: collection, docId: docId)
-        let env = try Web3CCrypto.seal(kEnc: k.enc, aad: aad, plaintext: plain)
+        let env = try Web3CCrypto.seal(kEnc: k.enc, aad: aad, plaintext: data)
         let (d, _) = try await perform("PUT", "/v1/g/\(gid)/d/\(collection)/\(docId)", body: env,
                                        contentType: "application/octet-stream", headers: ["If-Match": String(ifMatch)])
         struct R: Decodable { let seq: Int64 }
         return try decode(R.self, d).seq
+    }
+
+    private func nextCounter(_ explicit: Int64?, collection: String, logicalId: String) throws -> Int64 {
+        if let c = explicit {
+            guard c >= 1 else { throw SyncError.invalid("counter must be >= 1") }
+            return c
+        }
+        let (_, k) = try requireGroup()
+        let docId = Web3CCrypto.docId(kId: k.id, collection: collection, logicalId: logicalId)
+        return (counterFloor?(collection, docId) ?? 0) + 1
+    }
+
+    /// Chiffre et écrit un document. `ifMatch` : 0 pour une création, sinon le `seq` de base. Retourne le nouveau `seq`.
+    /// `counter` (`c`, >= 1) : doit valoir `max(c local, c distant) + 1`. Si nil : `counterFloor(collection, docId) + 1`
+    /// (1 sans plancher) ; passer `upsert` pour un calcul qui lit le `c` distant.
+    @discardableResult
+    public func putDoc(collection: String, logicalId: String, payload: JSONValue, updatedAt: Int64, counter: Int64? = nil,
+                       ifMatch: Int64) async throws -> Int64 {
+        let c = try nextCounter(counter, collection: collection, logicalId: logicalId)
+        return try await write(collection: collection, logicalId: logicalId,
+                               plain: Plain(v: 1, u: updatedAt, c: c, k: logicalId, d: payload, del: nil), ifMatch: ifMatch)
+    }
+
+    /// Écrit un marqueur de suppression authentifié `{"v":1,"u","c","k","del":true}` (sans `d`). Règles ordinaires :
+    /// `u`, `c` croissant, `If-Match`. C'est le seul moyen de supprimer un élément pour les autres appareils.
+    @discardableResult
+    public func putMarker(collection: String, logicalId: String, updatedAt: Int64, counter: Int64, ifMatch: Int64) async throws -> Int64 {
+        guard counter >= 1 else { throw SyncError.invalid("counter must be >= 1") }
+        return try await write(collection: collection, logicalId: logicalId,
+                               plain: Plain(v: 1, u: updatedAt, c: counter, k: logicalId, d: nil, del: true), ifMatch: ifMatch)
     }
 
     private func openDocument(collection: String, docId: String, envelope: Data, seq: Int64, serverUpdatedAt: Int64) throws -> SyncDocument {
@@ -311,11 +402,17 @@ public actor Web3CSyncClient {
         let pt = try Web3CCrypto.open(kEnc: k.enc, aad: aad, envelope: envelope)
         guard let p = try? JSONDecoder().decode(Plain.self, from: pt), p.v == 1 else { throw SyncError.decryption }
         guard Web3CCrypto.docId(kId: k.id, collection: collection, logicalId: p.k) == docId else { throw SyncError.integrity }
-        return SyncDocument(collection: collection, logicalId: p.k, docId: docId, payload: p.d, updatedAt: p.u,
-                            seq: seq, serverUpdatedAt: serverUpdatedAt)
+        guard let c = p.c, c >= 1 else { throw SyncError.missingCounter }
+        let isDel = p.del == true
+        if p.del == false || (isDel && p.d != nil) || (!isDel && p.d == nil) { throw SyncError.decryption }
+        if let floor = counterFloor?(collection, docId), c < floor { throw SyncError.rollback }
+        let u = min(p.u, nowMs() + 5 * 60 * 1000)
+        return SyncDocument(collection: collection, logicalId: p.k, docId: docId, payload: p.d ?? .null, updatedAt: u,
+                            rawUpdatedAt: p.u, counter: c, deleted: isDel, seq: seq, serverUpdatedAt: serverUpdatedAt)
     }
 
-    /// Lit, déchiffre et vérifie un document. 404 -> `.notFound` ; supprimé -> `.gone(seq:)`.
+    /// Lit, déchiffre et vérifie un document. 404 -> `.notFound` ; tombstone serveur -> `.gone(seq:)` ; compteur sous le
+    /// plancher -> `.rollback` ; sans `c` -> `.missingCounter`. Un marqueur `del` est rendu avec `deleted == true`.
     public func getDoc(collection: String, logicalId: String) async throws -> SyncDocument {
         let (gid, k) = try requireGroup()
         let docId = Web3CCrypto.docId(kId: k.id, collection: collection, logicalId: logicalId)
@@ -337,7 +434,10 @@ public actor Web3CSyncClient {
         return try decode(R.self, d).seq
     }
 
-    /// Une page de `changes`. Les éléments illisibles sont listés dans `rejected` (le curseur avance quand même).
+    /// Une page de `changes`. Les éléments illisibles, sans `c` ou sous le plancher de compteur sont listés dans
+    /// `rejected` (avec `error`) ; le curseur avance quand même. Un `next` inférieur à `since` lève `.rollback`.
+    /// Les tombstones renvoyés par le serveur ne sont PAS authentifiés (`Tombstone.isAuthenticated == false`) : à ignorer
+    /// pour supprimer ; seuls les éléments `deleted == true` (marqueurs `del` déchiffrés) font foi.
     public func changes(since: Int64, limit: Int? = nil) async throws -> ChangesPage {
         let gid = try requireGroupId()
         var q = "/v1/g/\(gid)/changes?since=\(since)"
@@ -349,28 +449,34 @@ public actor Web3CSyncClient {
         }
         struct R: Decodable { let items: [Item]; let next: Int64; let more: Bool }
         let r = try decode(R.self, d)
+        if r.next < since { throw SyncError.rollback }
         var page = ChangesPage(items: [], tombstones: [], rejected: [], next: r.next, more: r.more)
         for it in r.items {
             if it.deleted {
                 page.tombstones.append(Tombstone(collection: it.collection, docId: it.docId, seq: it.seq, updatedAt: it.updatedAt ?? 0))
                 continue
             }
-            if let s = it.env, let env = B64.decode(s),
-               let doc = try? openDocument(collection: it.collection, docId: it.docId, envelope: env,
-                                           seq: it.seq, serverUpdatedAt: it.updatedAt ?? 0) {
-                page.items.append(doc)
-            } else {
-                page.rejected.append(RejectedChange(collection: it.collection, docId: it.docId, seq: it.seq))
+            var failure: SyncError = .decryption
+            if let s = it.env, let env = B64.decode(s) {
+                do {
+                    page.items.append(try openDocument(collection: it.collection, docId: it.docId, envelope: env,
+                                                       seq: it.seq, serverUpdatedAt: it.updatedAt ?? 0))
+                    continue
+                } catch let e as SyncError { failure = e } catch {}
             }
+            page.rejected.append(RejectedChange(collection: it.collection, docId: it.docId, seq: it.seq, error: failure))
         }
         return page
     }
 
-    /// Pagination complète depuis `since`.
-    public func changesAll(since: Int64 = 0, pageSize: Int? = nil) async throws -> ChangesPage {
+    /// Pagination complète depuis `since`. Plafonnée à `maxPages` pages (`.server(status: 200, code: "too_many_pages")`).
+    public func changesAll(since: Int64 = 0, pageSize: Int? = nil, maxPages: Int = 1000) async throws -> ChangesPage {
         var all = ChangesPage(items: [], tombstones: [], rejected: [], next: since, more: false)
         var cursor = since
+        var pages = 0
         while true {
+            pages += 1
+            if pages > max(1, maxPages) { throw SyncError.server(status: 200, code: "too_many_pages") }
             let p = try await changes(since: cursor, limit: pageSize)
             all.items += p.items
             all.tombstones += p.tombstones
@@ -386,8 +492,17 @@ public actor Web3CSyncClient {
 
     /// Boucle GET / fusion / PUT avec If-Match. `merge` reçoit l'état distant (nil si absent ou supprimé) et renvoie
     /// ce qu'il faut écrire (nil = ne rien écrire). Sur 409, relit et recommence, `maxAttempts` fois au plus.
-    public func upsert(collection: String, logicalId: String, maxAttempts: Int = 6,
+    /// Le compteur écrit est `max(counter local connu, plancher, c distant) + 1` ; `counter` = c local connu (optionnel).
+    public func upsert(collection: String, logicalId: String, counter: Int64? = nil, maxAttempts: Int = 6,
                        merge: @Sendable (SyncDocument?) async throws -> Candidate?) async throws -> UpsertResult {
+        try await upsertCore(collection: collection, logicalId: logicalId, counter: counter, maxAttempts: maxAttempts,
+                             passDeleted: false, merge: merge)
+    }
+
+    private func upsertCore(collection: String, logicalId: String, counter: Int64?, maxAttempts: Int, passDeleted: Bool,
+                            merge: @Sendable (SyncDocument?) async throws -> Candidate?) async throws -> UpsertResult {
+        let (_, k) = try requireGroup()
+        let docId = Web3CCrypto.docId(kId: k.id, collection: collection, logicalId: logicalId)
         var lastConflict: SyncError = .conflict(seq: -1)
         for _ in 0..<max(1, maxAttempts) {
             var remote: SyncDocument?
@@ -401,14 +516,16 @@ public actor Web3CSyncClient {
             } catch SyncError.gone(let seq) {
                 base = max(seq, 0)
             }
-            guard let cand = try await merge(remote) else {
-                guard let r = remote else { throw SyncError.notFound }
-                return UpsertResult(payload: r.payload, updatedAt: r.updatedAt, seq: r.seq, wrote: false)
+            let known = max(counter ?? 0, counterFloor?(collection, docId) ?? 0, remote?.counter ?? 0)
+            let visible = (remote?.deleted == true && !passDeleted) ? nil : remote
+            guard let cand = try await merge(visible) else {
+                guard let r = remote, passDeleted || !r.deleted else { throw SyncError.notFound }
+                return UpsertResult(payload: r.payload, updatedAt: r.updatedAt, seq: r.seq, counter: r.counter, wrote: false)
             }
             do {
                 let seq = try await putDoc(collection: collection, logicalId: logicalId, payload: cand.payload,
-                                           updatedAt: cand.updatedAt, ifMatch: base)
-                return UpsertResult(payload: cand.payload, updatedAt: cand.updatedAt, seq: seq, wrote: true)
+                                           updatedAt: cand.updatedAt, counter: known + 1, ifMatch: base)
+                return UpsertResult(payload: cand.payload, updatedAt: cand.updatedAt, seq: seq, counter: known + 1, wrote: true)
             } catch let e as SyncError {
                 guard case .conflict = e else { throw e }
                 lastConflict = e
@@ -417,12 +534,15 @@ public actor Web3CSyncClient {
         throw lastConflict
     }
 
-    /// Variante avec valeur locale : le `u` interne le plus récent gagne (égalité : l'état distant est conservé).
-    public func upsert(collection: String, logicalId: String, local: Candidate, maxAttempts: Int = 6,
+    /// Variante avec valeur locale : le `u` interne le plus récent gagne (égalité : l'état distant est conservé). Un
+    /// marqueur `del` distant participe à la comparaison (il n'est écrasé que par un `u` strictement plus récent) et
+    /// n'est pas transmis à `merge`.
+    public func upsert(collection: String, logicalId: String, local: Candidate, counter: Int64? = nil, maxAttempts: Int = 6,
                        merge: (@Sendable (_ local: Candidate, _ remote: SyncDocument) -> Candidate)? = nil) async throws -> UpsertResult {
-        try await upsert(collection: collection, logicalId: logicalId, maxAttempts: maxAttempts) { remote in
+        try await upsertCore(collection: collection, logicalId: logicalId, counter: counter, maxAttempts: maxAttempts,
+                             passDeleted: true) { remote in
             guard let remote = remote else { return local }
-            if let merge = merge { return merge(local, remote) }
+            if let merge = merge, !remote.deleted { return merge(local, remote) }
             if local.updatedAt > remote.updatedAt { return local }
             return nil
         }

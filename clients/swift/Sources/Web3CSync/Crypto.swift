@@ -50,6 +50,8 @@ public struct DerivedKeys: Sendable, Equatable {
     public let enc: Data
     public let id: Data
     public let name: Data
+    /// `K_rating` : pseudonymes des notes publiques (§2). Ne sert qu'à cela.
+    public let rating: Data
 }
 
 public enum Web3CCrypto {
@@ -94,7 +96,8 @@ public enum Web3CCrypto {
     }
 
     public static func deriveKeys(_ kg: Data) -> DerivedKeys {
-        DerivedKeys(enc: hkdf(kg, info: "enc"), id: hkdf(kg, info: "id"), name: hkdf(kg, info: "name"))
+        DerivedKeys(enc: hkdf(kg, info: "enc"), id: hkdf(kg, info: "id"), name: hkdf(kg, info: "name"),
+                    rating: hkdf(kg, info: "rating"))
     }
 
     /// `docId = b64url(HMAC-SHA256(K_id, field(collection) || field(logicalId)))`
@@ -207,16 +210,24 @@ public enum Web3CCrypto {
         return s == "" ? "0" : s
     }
 
+    /// `HMAC(K_rating, field("rating") || field(profileId) || field(contentKey))`. `kUser` est `K_rating` du groupe
+    /// (`DerivedKeys.rating`) si le profil en a un, sinon une clé locale aléatoire. Ne jamais passer `K_id`.
     public static func pseudonym(kUser: Data, profileId: String, contentKey: String) -> String {
         let mac = HMAC<SHA256>.authenticationCode(
             for: fields("rating", profileId, contentKey), using: SymmetricKey(data: kUser))
         return B64.encode(Data(mac))
     }
 
-    public static func powDigest(contentKey: String, pseudonym: String, rating: Double?, n: UInt64) -> Data {
+    /// Variante nommée explicitement : `kRating` = `DerivedKeys.rating`.
+    public static func pseudonym(kRating: Data, profileId: String, contentKey: String) -> String {
+        pseudonym(kUser: kRating, profileId: profileId, contentKey: contentKey)
+    }
+
+    public static func powDigest(contentKey: String, pseudonym: String, rating: Double?, t: Int64, n: UInt64) -> Data {
         var buf = field(contentKey)
         buf.append(field(pseudonym))
         buf.append(Data(ratingText(rating).utf8))
+        buf.append(u64(UInt64(bitPattern: t)))
         buf.append(u64(n))
         return Data(SHA256.hash(data: buf))
     }
@@ -230,22 +241,22 @@ public enum Web3CCrypto {
         return n
     }
 
-    public static func powOk(contentKey: String, pseudonym: String, rating: Double?, n: UInt64, powBits: Int) -> Bool {
-        leadingZeroBits(powDigest(contentKey: contentKey, pseudonym: pseudonym, rating: rating, n: n)) >= powBits
+    public static func powOk(contentKey: String, pseudonym: String, rating: Double?, t: Int64, n: UInt64, powBits: Int) -> Bool {
+        leadingZeroBits(powDigest(contentKey: contentKey, pseudonym: pseudonym, rating: rating, t: t, n: n)) >= powBits
     }
 
-    /// Plus petit `n` valide (bloquant).
-    public static func solvePow(contentKey: String, pseudonym: String, rating: Double?, powBits: Int) -> UInt64 {
+    /// Plus petit `n` valide (bloquant). `t` : instant du vote, secondes Unix (lié à la preuve, §9).
+    public static func solvePow(contentKey: String, pseudonym: String, rating: Double?, t: Int64, powBits: Int) -> UInt64 {
         var n: UInt64 = 0
-        while !powOk(contentKey: contentKey, pseudonym: pseudonym, rating: rating, n: n, powBits: powBits) { n += 1 }
+        while !powOk(contentKey: contentKey, pseudonym: pseudonym, rating: rating, t: t, n: n, powBits: powBits) { n += 1 }
         return n
     }
 
     /// Version coopérative : cède régulièrement la main et respecte l'annulation.
-    public static func solvePowAsync(contentKey: String, pseudonym: String, rating: Double?, powBits: Int) async throws -> UInt64 {
+    public static func solvePowAsync(contentKey: String, pseudonym: String, rating: Double?, t: Int64, powBits: Int) async throws -> UInt64 {
         var n: UInt64 = 0
         while true {
-            if powOk(contentKey: contentKey, pseudonym: pseudonym, rating: rating, n: n, powBits: powBits) { return n }
+            if powOk(contentKey: contentKey, pseudonym: pseudonym, rating: rating, t: t, n: n, powBits: powBits) { return n }
             n += 1
             if n % 2048 == 0 {
                 try Task.checkCancellation()
