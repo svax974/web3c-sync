@@ -10,6 +10,7 @@ import 'package:web3c_sync/web3c_sync.dart';
 const _inst = 'iptv';
 
 void main() {
+  linkErrorsDoNotLeakTheLink();
   late DeviceKey key;
   late String gid;
   late Uint8List kg;
@@ -303,5 +304,26 @@ void main() {
             reason: k);
       }
     });
+  });
+}
+
+// A malformed pairing link must never echo the link (it carries the group key).
+// Appended after the existing tests; kept in this file to share its imports.
+void linkErrorsDoNotLeakTheLink() {
+  test('GroupLink.parse errors never contain the link', () {
+    const secret = 'SUPERSECRETKEYMATERIAL';
+    for (final bad in [
+      'web3c-link:v1?s=https://x&i=iptv&g=short&t=tok&k=$secret',
+      'not-a-link-$secret',
+      'web3c-link:v1?s=https://x&i=iptv&g=AAAAAAAAAAAAAAAAAAAAAA&t=&k=$secret',
+    ]) {
+      try {
+        GroupLink.parse(bad);
+        fail('should have thrown');
+      } on FormatException catch (e) {
+        expect(e.toString(), isNot(contains(secret)));
+        expect(e.source, isNull);
+      }
+    }
   });
 }

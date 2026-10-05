@@ -17,3 +17,4 @@ export 'src/device_key.dart';
 export 'src/errors.dart';
 export 'src/group_link.dart';
 export 'src/tls_pinning.dart' show parseFingerprint, pinnedHttpClient;
+export 'src/transport.dart' show checkBaseUrl;
