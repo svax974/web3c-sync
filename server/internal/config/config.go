@@ -53,7 +53,7 @@ type Config struct {
 	OpenRegistration  bool
 }
 
-var defaultMaxDocs = map[string]int{"iptv": 20000, "banking": 5000, "aiteam": 50000}
+var defaultMaxDocs = map[string]int{"iptv": 20000, "banking": 20000, "aiteam": 50000}
 
 // defaultMaxBytesMiB: conversation history (one document per message) needs room.
 var defaultMaxBytesMiB = map[string]int{"iptv": 64, "banking": 64, "aiteam": 256}
