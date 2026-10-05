@@ -1,5 +1,6 @@
 // genvectors writes spec/vectors/v1.json from fixed inputs. Run:
-//   go run ./cmd/genvectors > ../spec/vectors/v1.json
+//
+//	go run ./cmd/genvectors > ../spec/vectors/v1.json
 package main
 
 import (
@@ -41,6 +42,19 @@ func main() {
 	pseud := proto.Pseudonym(keys.ID, "profile-1", "movie:tmdb:603")
 	n := proto.SolvePow("movie:tmdb:603", pseud, &r, 12)
 
+	powCases := []map[string]any{}
+	for _, c := range []struct{ r *float64 }{{ptr(7)}, {ptr(7.5)}, {ptr(0)}, {nil}} {
+		nn := proto.SolvePow("movie:tmdb:603", pseud, c.r, 12)
+		d := proto.PowDigest("movie:tmdb:603", pseud, c.r, nn)
+		m := map[string]any{"ratingText": proto.RatingText(c.r), "n": nn, "digest": proto.B64(d[:])}
+		if c.r != nil {
+			m["r"] = *c.r
+		} else {
+			m["r"] = nil
+		}
+		powCases = append(powCases, m)
+	}
+
 	padLens := []int{}
 	padIn := []int{0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 100, 255, 256, 1000, 4096, 65536}
 	for _, l := range padIn {
@@ -68,6 +82,7 @@ func main() {
 			"body": string(body), "bodyHash": proto.BodyHash(body), "instance": instance,
 			"canonical": string(canon), "signature": proto.Sign(priv, canon),
 		},
+		"ratingCases": powCases,
 		"rating": map[string]any{
 			"profileId": "profile-1", "contentKey": "movie:tmdb:603", "kUser": "id",
 			"pseudonym": pseud, "r": r, "ratingText": proto.RatingText(&r),
@@ -79,3 +94,5 @@ func main() {
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
 }
+
+func ptr(f float64) *float64 { return &f }

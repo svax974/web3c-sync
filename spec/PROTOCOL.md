@@ -140,7 +140,8 @@ Chaque écriture dans un groupe incrémente un compteur `seq` du groupe.
   `{"seq":n}`. 409 si le `seq` courant du document diffère ; la réponse porte
   `{"seq":n}` ; le client récupère, **fusionne** (le `u` interne le plus récent
   gagne), puis réécrit.
-- `GET …` → corps = enveloppe ; en-têtes `X-Seq`, `X-Updated-At`.
+- `GET …` → corps = enveloppe ; en-têtes `X-Seq`, `X-Updated-At`. Un document
+  supprimé répond **410** avec `X-Seq` et `X-Deleted: 1`.
 - `DELETE …` (`If-Match` obligatoire) → tombstone : le contenu est effacé, `deleted`
   est vrai, `seq` augmente. Les tombstones sont conservés pour la vie du groupe.
 - `GET /v1/g/{gid}/changes?since=N&limit=500` → `{"items":[{"collection":"…",
@@ -185,6 +186,7 @@ appareil.
     canonique(r) || u64(n))` doit avoir au moins `powBits` bits de poids fort à 0
     (16 par défaut). `canonique(r)` = `r` en texte décimal le plus court
     (`7`, `7.5`, `null`).
+    Jamais `7.0`, jamais d'exposant.
   - Limitation de débit par IP (mémoire seule, rien n'est écrit sur disque).
 - **Lecture** : `GET /v1/public/ratings/{contentKey}` → `{"count":n,"sum":x,
   "avg":x}` ; `POST /v1/public/ratings/query` `{"keys":[…≤100]}` →

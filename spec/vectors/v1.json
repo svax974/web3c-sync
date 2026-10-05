@@ -59,6 +59,32 @@
     "r": 7.5,
     "ratingText": "7.5"
   },
+  "ratingCases": [
+    {
+      "digest": "AAFyZB8quNbGmVpJmP_-JdKQZLVikNpLGXdPptmM-d0",
+      "n": 15694,
+      "r": 7,
+      "ratingText": "7"
+    },
+    {
+      "digest": "AA4yvDsTPb7z8x4chsVoJCbj3qU_GLzNNejRRhW7Ilw",
+      "n": 184,
+      "r": 7.5,
+      "ratingText": "7.5"
+    },
+    {
+      "digest": "AAggEs-wINfamxNkrbQxy1eiWI604HrTBWmJdDKcf6g",
+      "n": 9971,
+      "r": 0,
+      "ratingText": "0"
+    },
+    {
+      "digest": "AAM98ClUujaHUZ1aDPSo-gh_xtq2zBoM-ADaJOnsaN0",
+      "n": 1412,
+      "r": null,
+      "ratingText": "null"
+    }
+  ],
   "request": {
     "body": "{\"groupId\":\"AAAAAAAAAAAAAAAAAAAAAA\"}",
     "bodyHash": "7dcdc2e22a554081d9eff014e6081aaf825e911dd8da9de4a256669b67bdb3e7",
