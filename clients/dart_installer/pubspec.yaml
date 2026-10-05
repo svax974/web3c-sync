@@ -1,0 +1,16 @@
+name: web3c_sync_installer
+description: Installs the web3c-sync "personal server" on a user's Linux host over SSH (pure Dart).
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  dartssh2: ^3.3.1
+  meta: ^1.11.0
+
+dev_dependencies:
+  crypto: ^3.0.3
+  lints: ^4.0.0
+  test: ^1.25.0

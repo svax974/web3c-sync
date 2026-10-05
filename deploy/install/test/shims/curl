@@ -1,0 +1,8 @@
+#!/bin/sh
+# Faux curl : répond au health check si les « conteneurs » sont démarrés.
+S=${SHIM_STATE:?}
+printf '%s\n' "$*" >> "$S/curl.log"
+case "$*" in
+  */v1/health*) if [ -f "$S/running" ] && [ ! -f "$S/health_fail" ]; then echo '{"ok":true,"instance":"iptv","v":1}'; exit 0; fi; exit 22 ;;
+esac
+exit 1

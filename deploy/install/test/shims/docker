@@ -1,0 +1,30 @@
+#!/bin/sh
+# Faux docker pour les tests de install.sh : AUCUN vrai Docker. Journalise les
+# appels dans $SHIM_STATE/docker.log et simule l'état « conteneurs démarrés ».
+S=${SHIM_STATE:?}
+printf '%s\n' "$*" >> "$S/docker.log"
+case "$1" in
+  info) [ ! -f "$S/docker_down" ] ;;
+  compose)
+    shift
+    if [ "$1" = version ]; then echo "Docker Compose version v2.0.0-shim"; exit 0; fi
+    # compose -f FILE -p PROJECT <cmd> ...
+    f=$2; shift 4
+    case "$1" in
+      up) [ -f "$f" ] || exit 1; [ ! -f "$S/up_fail" ] || exit 1
+          cp "$f" "$S/last-compose.yml"; touch "$S/running" ;;
+      down) rm -f "$S/running" ;;
+      ps) ;;
+    esac ;;
+  pull) echo "pulled $2"; [ ! -f "$S/pull_fail" ] ;;
+  image)
+    case "$*" in
+      *RepoDigests*) [ -f "$S/no_repodigest" ] || echo "ghcr.io/svax974/web3c-sync@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
+      *Labels*) echo "1.2.3" ;;
+      *.Id*) echo "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ;;
+    esac ;;
+  network) [ -f "$S/networks" ] && cat "$S/networks" || true ;;
+  ps) [ -f "$S/running" ] && echo "abc123" || true ;;
+  logs) echo "(logs simulés)" ;;
+  *) exit 0 ;;
+esac

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Faux getent ahosts NOM : lit $SHIM_STATE/dns (lignes « nom ip »).
+S=${SHIM_STATE:?}
+[ "$1" = ahosts ] || exit 2
+[ -f "$S/dns" ] || exit 2
+grep "^$2 " "$S/dns" | while read -r n ip; do echo "$ip STREAM $n"; done

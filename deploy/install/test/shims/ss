@@ -1,0 +1,5 @@
+#!/bin/sh
+# Faux ss -H -ltn : adresses locales lues dans $SHIM_STATE/listen
+S=${SHIM_STATE:?}
+[ -f "$S/listen" ] || exit 0
+while read -r a; do echo "LISTEN 0 4096 $a 0.0.0.0:*"; done < "$S/listen"
