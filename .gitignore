@@ -1,0 +1,8 @@
+*.db
+*.db-wal
+*.db-shm
+/server/syncd
+/data/
+.dart_tool/
+.build/
+node_modules/

@@ -1,0 +1,86 @@
+{
+  "docId": {
+    "collection": "progress",
+    "docId": "PozOeDxekC4ArpWy012UEwcJvU6GPtUJy-69g7SZTC4",
+    "logicalId": "movie_1234"
+  },
+  "hkdf": {
+    "enc": "CUkOyhQ6B5JRHr1A3Prg0H87XcQGvcS6Z2vPpoQyqMc",
+    "id": "AjxqFfPx1yPaSJ7rG0njrShmPWMwXdP6acXQs98x7lM",
+    "kg": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "name": "KEuCw1GHUYBrXsmvZXri1tqytO3DmuClNTaTnjATN1c"
+  },
+  "padme": {
+    "in": [
+      0,
+      1,
+      2,
+      3,
+      7,
+      8,
+      9,
+      15,
+      16,
+      17,
+      100,
+      255,
+      256,
+      1000,
+      4096,
+      65536
+    ],
+    "out": [
+      0,
+      1,
+      2,
+      3,
+      7,
+      8,
+      10,
+      16,
+      16,
+      18,
+      104,
+      256,
+      256,
+      1024,
+      4096,
+      65536
+    ]
+  },
+  "rating": {
+    "contentKey": "movie:tmdb:603",
+    "digest": "AA4yvDsTPb7z8x4chsVoJCbj3qU_GLzNNejRRhW7Ilw",
+    "kUser": "id",
+    "n": 184,
+    "powBits": 12,
+    "profileId": "profile-1",
+    "pseudonym": "OqvvqWmlsuSHgyNmeXaNsVuHCKIyvz_KHs7OyRJtMjY",
+    "r": 7.5,
+    "ratingText": "7.5"
+  },
+  "request": {
+    "body": "{\"groupId\":\"AAAAAAAAAAAAAAAAAAAAAA\"}",
+    "bodyHash": "7dcdc2e22a554081d9eff014e6081aaf825e911dd8da9de4a256669b67bdb3e7",
+    "canonical": "web3c-sync/v1\nPUT\n/v1/g/AAAAAAAAAAAAAAAAAAAAAA/d/progress/PozOeDxekC4ArpWy012UEwcJvU6GPtUJy-69g7SZTC4?x=1\n1760000000\nMDEyMzQ1Njc4OTo7PD0-Pw\n7dcdc2e22a554081d9eff014e6081aaf825e911dd8da9de4a256669b67bdb3e7\niptv",
+    "instance": "iptv",
+    "method": "PUT",
+    "nonce": "MDEyMzQ1Njc4OTo7PD0-Pw",
+    "path": "/v1/g/AAAAAAAAAAAAAAAAAAAAAA/d/progress/PozOeDxekC4ArpWy012UEwcJvU6GPtUJy-69g7SZTC4?x=1",
+    "pub": "d3bocLkzVPKgskwj8qNsxOgOIjIYwbl5Jv3QGDlqK5s",
+    "seed": "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8",
+    "signature": "RXAeOisvjplLknABaZyG8_urpd7wuntgOKZJMLQ89NgzFKnRhJEknevjzcYIcXngFQHdr1rOw2M7y0dkfQhcAg",
+    "timestamp": "1760000000"
+  },
+  "seal": {
+    "aad": "d2ViM2Mtc3luYy92MQAABGlwdHYAFkFBQUFBQUFBQUFBQUFBQUFBQUFBQUEACHByb2dyZXNzACtQb3pPZUR4ZWtDNEFycFd5MDEyVUV3Y0p2VTZHUHRVSnktNjlnN1NaVEM0",
+    "collection": "progress",
+    "docId": "PozOeDxekC4ArpWy012UEwcJvU6GPtUJy-69g7SZTC4",
+    "envelope": "AaChoqOkpaanqKmqq2OJU3z5GJzLxrmulDmjWCdjTTCDECyByHxO6wYpUcoSVxuHqIv1SaERfscGO-dBWeXnTizHFh7EcKi_KIRQb-r1vDllA_PADw",
+    "groupId": "AAAAAAAAAAAAAAAAAAAAAA",
+    "instance": "iptv",
+    "nonce": "oKGio6Slpqeoqaqr",
+    "plaintext": "{\"v\":1,\"u\":1760000000000,\"d\":{\"pos\":120,\"dur\":5400}}"
+  },
+  "version": "web3c-sync/v1"
+}
