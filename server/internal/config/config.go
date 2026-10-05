@@ -34,6 +34,8 @@ type Config struct {
 	JoinTokenTTL   time.Duration
 }
 
+var defaultMaxDocs = map[string]int{"iptv": 20000, "banking": 5000, "aiteam": 5000}
+
 var defaultCollections = map[string]string{
 	"iptv": "profiles,progress,ratings,favorites,lists,order,sources,prefs,_name",
 }
@@ -91,7 +93,7 @@ func Load() (*Config, error) {
 		d   int
 	}{
 		{&c.PowBits, "SYNC_POW_BITS", 16},
-		{&c.MaxDocs, "SYNC_MAX_DOCS", 5000},
+		{&c.MaxDocs, "SYNC_MAX_DOCS", defaultMaxDocs[c.Instance]},
 		{&c.WritesPerMin, "SYNC_WRITES_PER_MIN", 120},
 		{&c.CreatesPerDay, "SYNC_CREATES_PER_DAY", 20},
 		{&c.VotesPerMin, "SYNC_VOTES_PER_MIN", 30},

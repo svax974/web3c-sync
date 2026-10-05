@@ -159,7 +159,7 @@ Chaque écriture dans un groupe incrémente un compteur `seq` du groupe.
   L'authentification est celle d'une requête GET ordinaire (§5).
 
 Limites par instance (valeurs par défaut du serveur fourni) : document ≤ 256 KiB,
-≤ 5 000 documents et ≤ 64 MiB par groupe, ≤ 120 écritures/minute/appareil.
+≤ 5 000 documents (20 000 pour `iptv`) et ≤ 64 MiB par groupe, ≤ 120 écritures/minute/appareil.
 Dépassement : 413 ou 429 avec un corps `{"error":"quota","limit":"…"}`.
 
 ## 8. Rotation de la clé de groupe (premier lot : manuelle)
