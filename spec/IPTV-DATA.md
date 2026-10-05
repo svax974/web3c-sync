@@ -15,7 +15,7 @@ même façon aux trois : un seul format sur le fil.
    les notes (maps) : limite de 1 Mio, relecture complète à chaque pull. Le
    nouveau modèle utilise **un document par élément**.
 3. **Aucune suppression ne se propage** (pas de tombstone) : une entrée supprimée
-   réapparaît au pull suivant. Le serveur Web3C porte les tombstones.
+   réapparaît au pull suivant. Le nouveau modèle propage les suppressions par marqueurs chiffrés.
 4. **Règle de fusion incohérente** : la progression garde « la position la plus
    avancée », les notes « le plus récent ». Nouveau modèle : **le plus récent
    gagne, partout** (`u` interne), pour qu'un re-visionnage plus court ou une
@@ -87,8 +87,8 @@ son `k` permet de retrouver l'élément.
 | Même `k`, deux `u` différents | `u` le plus grand gagne ; égalité : comparaison lexicographique de la charge utile sérialisée (déterministe) |
 | `progress` | LWW sur `u` ; `done` vrai si `pos/dur ≥ 0,9` (seuil unique, remplace 0,92 de l'agent et 0,97 de tvOS) |
 | Liste personnalisée | document entier : LWW sur la liste (pas de fusion élément par élément au premier lot) |
-| `profiles` | LWW ; la suppression d'un profil publie ses tombstones (`profiles`, puis chaque doc `{profileId}/…`) |
-| `sources` | LWW ; la suppression locale publie un tombstone |
+| `profiles` | LWW ; la suppression d'un profil publie des marqueurs de suppression (`profiles`, puis chaque doc `{profileId}/…`) |
+| `sources` | LWW ; la suppression locale publie un marqueur de suppression |
 
 **Précisions normatives** (décidées à l'implémentation du premier moteur, Flutter ;
 tout autre moteur les respecte) :
@@ -107,7 +107,7 @@ tout autre moteur les respecte) :
   contenu : sérialisés en texte dans les clés ; un moteur ignore ceux qu'il ne sait
   pas représenter.
 - **Source dont l'adresse est modifiée** : sa `sourceKey` change ; l'ancienne est
-  supprimée (tombstone), la nouvelle écrite, et les profils sont renvoyés.
+  supprimée (marqueur), la nouvelle écrite, et les profils sont renvoyés.
 - **Sources non résolubles** par ce profil (par ex. `syncSources` désactivé) : leurs
   clés restent dans la sélection du profil et sont réécrites telles quelles.
 - Premier appairage d'un appareil neuf : un profil local **vide et jamais
