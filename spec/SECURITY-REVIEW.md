@@ -2,10 +2,26 @@
 
 Date : 2026-10-05. Périmètre : `spec/PROTOCOL.md`, `spec/IPTV-DATA.md`, `server/` (Go),
 `clients/dart`, `clients/swift`. Revue en lecture seule du dépôt ; les preuves ont été
-produites par des tests Go jetables dans un **copie** du module
-(`/private/tmp/claude-501/-Users-steph-Dev-Apps-vxiptv-workspace/1e26ccf8-60dc-49ae-9551-e68fcd532bf9/scratchpad/review/server/internal/api/sec*_test.go`,
-lancés par `go test -ldflags=-linkmode=external ./internal/api -run TestSec -v`).
-Rien n'a été modifié dans le dépôt hormis ce fichier.
+produites par des tests Go jetables dans une copie du module (hors dépôt) ;
+les défauts confirmés sont désormais couverts par des tests de non-régression
+(`server/internal/api/security_test.go`, `server/internal/store/store_test.go`).
+La revue elle-même n'a rien modifié dans le dépôt hormis ce fichier.
+
+## Suivi des corrections (état au 2026-10-05)
+
+| Constats | État |
+|---|---|
+| C1–C12 (serveur) | Corrigés, un test de non-régression chacun |
+| C13 (Swift, empreinte TLS), C14 (Dart, `changesAll`) | Corrigés dans les clients |
+| S1 — suppression, retour en arrière | Détectés : suppressions authentifiées par marqueurs `del`, compteur `c` par document, mémoire de curseur. **Non couverts** : retard ou dissimulation d'écritures, vues différentes par appareil (PROTOCOL §14) |
+| S2 (secondes/millisecondes) | Résolu : les suppressions sont des marqueurs en millisecondes |
+| S3 (horloge en avance) | Résolu : `u` ramené à `now + 5 min` |
+| S4 (pas de rotation de clé) | **Non résolu**, documenté (PROTOCOL §8, §14) : un appareil révoqué garde la clé |
+| S5 | Partiel : collections réservées, codes 413/429 alignés ; hôte non signé : non traité |
+| §5 (pseudonyme des notes) | Résolu : clé dédiée `K_rating` |
+| §6 redirections, HTTP clair | Résolu dans les clients (redirections non suivies, HTTP refusé hors loopback) ; épinglage sur certificat feuille : documenté |
+
+Les chapitres suivants sont conservés tels qu'ils ont été remis, à titre d'historique.
 
 ## 1. Modèle de menace
 
