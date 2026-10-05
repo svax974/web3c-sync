@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"web3c.cc/sync/internal/config"
@@ -23,14 +24,17 @@ import (
 )
 
 const (
-	clockSkew = 120 * time.Second
-	nonceTTL  = 5 * time.Minute
+	clockSkew     = 120 * time.Second
+	nonceTTL      = 5 * time.Minute
+	voteSkew      = 10 * time.Minute
+	writeDeadline = 60 * time.Second
+	touchEvery    = time.Hour
 )
 
 var (
-	reCollection = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+	reCollection = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`) // no leading "_": reserved
 	reBlobID     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	reContentKey = regexp.MustCompile(`^[a-z0-9:_.-]{1,128}$`)
+	reContentKey = regexp.MustCompile(`^(movie|tv|series):tmdb:[0-9]{1,9}$`)
 )
 
 type Server struct {
@@ -38,24 +42,44 @@ type Server struct {
 	st     *store.Store
 	hub    *hub
 	nonces *nonceCache
-	rlIP   *limiter // group creation, per IP
-	rlDev  *limiter // writes, per device
-	rlVote *limiter // public votes, per IP
-	rlRead *limiter // public reads, per IP
+	rlAny  *limiter // every request, per client address
+	rlIP   *limiter // group creation, per address
+	rlDev  *limiter // writes / token minting, per device
+	rlRead *limiter // reads, per device and per address
+	rlVote *limiter // public votes per minute, per address
+	rlDay  *limiter // public votes per day, per address
+	rlAdm  *limiter // failed admin-token attempts, per address
 	m      metrics
 	now    func() time.Time
+
+	sem       chan struct{} // bounds concurrent non-stream requests
+	touchMu   sync.Mutex
+	lastTouch map[string]time.Time
 }
 
 func New(cfg *config.Config, st *store.Store) *Server {
+	inflight := cfg.MaxInFlight
+	if inflight <= 0 {
+		inflight = 256
+	}
 	return &Server{
 		cfg: cfg, st: st, hub: newHub(), nonces: newNonceCache(),
-		rlIP: newLimiter(), rlDev: newLimiter(), rlVote: newLimiter(), rlRead: newLimiter(),
-		now: time.Now,
+		rlAny: newLimiter(), rlIP: newLimiter(), rlDev: newLimiter(), rlRead: newLimiter(),
+		rlVote: newLimiter(), rlDay: newLimiter(), rlAdm: newLimiter(),
+		now: time.Now, sem: make(chan struct{}, inflight), lastTouch: map[string]time.Time{},
 	}
 }
 
 func (s *Server) quota() store.Quota {
-	return store.Quota{MaxDocs: s.cfg.MaxDocs, MaxBytes: s.cfg.MaxBytes, MaxBlobSize: s.cfg.MaxBlobSize}
+	rows := s.cfg.MaxRowsFactor * s.cfg.MaxDocs
+	if rows < s.cfg.MaxDocs {
+		rows = s.cfg.MaxDocs
+	}
+	return store.Quota{
+		MaxDocs: s.cfg.MaxDocs, MaxRows: rows, MaxBytes: s.cfg.MaxBytes,
+		MaxBlobSize: s.cfg.MaxBlobSize, MaxBlobs: s.cfg.MaxBlobs, BlobMinCost: s.cfg.BlobMinCost,
+		MaxMembers: s.cfg.MaxMembers, MaxActiveTokens: s.cfg.MaxActiveTokens,
+	}
 }
 
 // Handler returns the full HTTP handler.
@@ -89,10 +113,26 @@ func (s *Server) Handler() http.Handler {
 	return s.instrument(mux)
 }
 
+// instrument counts responses, bounds concurrent work and sets a write
+// deadline on everything except SSE (which refreshes its own).
 func (s *Server) instrument(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, code: 200}
+		if !strings.HasSuffix(r.URL.Path, "/stream") {
+			select {
+			case s.sem <- struct{}{}:
+				defer func() { <-s.sem }()
+			default:
+				s.m.shed.Add(1)
+				errUnavailable.write(rec)
+				s.m.req5xx.Add(1)
+				return
+			}
+			_ = http.NewResponseController(w).SetWriteDeadline(s.now().Add(writeDeadline))
+		}
+		s.m.inFlight.Add(1)
 		next.ServeHTTP(rec, r)
+		s.m.inFlight.Add(-1)
 		switch {
 		case rec.code >= 500:
 			s.m.req5xx.Add(1)
@@ -127,77 +167,133 @@ type authed struct {
 
 type handler func(w http.ResponseWriter, r *http.Request, a *authed)
 
+type reqAuth struct {
+	pubB64, ts, nonce, sig string
+	pub                    ed25519.PublicKey
+}
+
+// preAuth does every check that needs no body: header shape, canonical key
+// encoding, clock window, nonce shape. Nothing is stored.
+func (s *Server) preAuth(r *http.Request) (*reqAuth, bool) {
+	a := &reqAuth{
+		pubB64: r.Header.Get("X-Device"), ts: r.Header.Get("X-Timestamp"),
+		nonce: r.Header.Get("X-Nonce"), sig: r.Header.Get("X-Signature"),
+	}
+	if a.pubB64 == "" || a.ts == "" || a.nonce == "" || a.sig == "" {
+		return nil, false
+	}
+	pub, err := proto.UnB64(a.pubB64)
+	if err != nil || len(pub) != ed25519.PublicKeySize || proto.B64(pub) != a.pubB64 {
+		return nil, false // non-canonical encodings would mint several identities for one key
+	}
+	a.pub = pub
+	sec, err := strconv.ParseInt(a.ts, 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	if d := s.now().Sub(time.Unix(sec, 0)); d > clockSkew || d < -clockSkew {
+		return nil, false
+	}
+	n, err := proto.UnB64(a.nonce)
+	if err != nil || len(n) != 16 || proto.B64(n) != a.nonce {
+		return nil, false
+	}
+	return a, true
+}
+
+// finishAuth verifies the signature over the body and then records the nonce.
+func (s *Server) finishAuth(r *http.Request, a *reqAuth, body []byte) (ok, busy bool) {
+	canon := proto.Canonical(r.Method, r.RequestURI, a.ts, a.nonce, proto.BodyHash(body), s.cfg.Instance)
+	if !proto.Verify(a.pub, canon, a.sig) {
+		return false, false
+	}
+	dup, full := s.nonces.seen(a.pubB64+"|"+a.nonce, s.now(), nonceTTL)
+	if full {
+		return false, true
+	}
+	return !dup, false
+}
+
 func (s *Server) signed(m mode, maxBody int64, h handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.rlAny.allow("a|"+s.clientIP(r), s.cfg.ReqsPerMin, time.Minute, s.now()) {
+			s.m.rateLimited.Add(1)
+			errRateLimited.write(w)
+			return
+		}
+		ra, ok := s.preAuth(r)
+		if !ok {
+			s.m.authFail.Add(1)
+			errUnauthorized.write(w)
+			return
+		}
+		gid := r.PathValue("gid")
+		owner := false
+		if m != modeSigned {
+			if !validGroupID(gid) {
+				errForbidden.write(w)
+				return
+			}
+			// Membership is checked BEFORE a large body is read: an anonymous
+			// caller can no longer make the server buffer megabytes.
+			member, isOwner, err := s.st.IsMember(gid, ra.pubB64)
+			if err != nil {
+				errUnavailable.write(w)
+				return
+			}
+			if !member || (m == modeOwner && !isOwner) {
+				s.m.authFail.Add(1)
+				errForbidden.write(w)
+				return
+			}
+			owner = isOwner
+		}
 		var body []byte
 		if maxBody > 0 && r.Body != nil {
-			lr := http.MaxBytesReader(w, r.Body, maxBody)
-			b, err := io.ReadAll(lr)
+			if r.ContentLength > maxBody {
+				errTooLarge.write(w)
+				return
+			}
+			b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 			if err != nil {
 				errTooLarge.write(w)
 				return
 			}
 			body = b
 		}
-		pub, ok := s.verify(r, body)
+		ok, busy := s.finishAuth(r, ra, body)
+		if busy {
+			errUnavailable.write(w)
+			return
+		}
 		if !ok {
 			s.m.authFail.Add(1)
 			errUnauthorized.write(w)
 			return
 		}
-		a := &authed{pub: pub, body: body, gid: r.PathValue("gid")}
 		if m != modeSigned {
-			if !validGroupID(a.gid) {
-				errForbidden.write(w)
-				return
-			}
-			member, owner, err := s.st.IsMember(a.gid, pub)
-			if err != nil {
-				errUnavailable.write(w)
-				return
-			}
-			if !member || (m == modeOwner && !owner) {
-				s.m.authFail.Add(1)
-				errForbidden.write(w)
-				return
-			}
-			a.owner = owner
+			s.touch(gid)
 		}
-		h(w, r, a)
+		h(w, r, &authed{pub: ra.pubB64, owner: owner, body: body, gid: gid})
 	}
 }
 
-// verify checks the request signature (§5) and returns the device key.
-func (s *Server) verify(r *http.Request, body []byte) (string, bool) {
-	pubB64, ts, nonce, sig := r.Header.Get("X-Device"), r.Header.Get("X-Timestamp"), r.Header.Get("X-Nonce"), r.Header.Get("X-Signature")
-	if pubB64 == "" || ts == "" || nonce == "" || sig == "" {
-		return "", false
-	}
-	pub, err := proto.UnB64(pubB64)
-	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return "", false
-	}
-	sec, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil {
-		return "", false
-	}
+// touch marks the group active (at most once per hour) so the inactivity
+// purge counts reads and pairings, not only writes.
+func (s *Server) touch(gid string) {
 	now := s.now()
-	if d := now.Sub(time.Unix(sec, 0)); d > clockSkew || d < -clockSkew {
-		return "", false
+	s.touchMu.Lock()
+	last, ok := s.lastTouch[gid]
+	if ok && now.Sub(last) < touchEvery {
+		s.touchMu.Unlock()
+		return
 	}
-	if n, err := proto.UnB64(nonce); err != nil || len(n) != 16 {
-		return "", false
+	if len(s.lastTouch) > 100_000 {
+		s.lastTouch = map[string]time.Time{}
 	}
-	canon := proto.Canonical(r.Method, r.RequestURI, ts, nonce, proto.BodyHash(body), s.cfg.Instance)
-	if !proto.Verify(pub, canon, sig) {
-		return "", false
-	}
-	// Only record the nonce once the signature is valid, so unauthenticated
-	// traffic cannot fill the cache.
-	if s.nonces.seen(pubB64+"|"+nonce, now, nonceTTL) {
-		return "", false
-	}
-	return pubB64, true
+	s.lastTouch[gid] = now
+	s.touchMu.Unlock()
+	s.st.Touch(gid)
 }
 
 func validGroupID(g string) bool {
@@ -220,16 +316,23 @@ func (s *Server) collectionOK(c string) bool {
 // ---------- groups ----------
 
 func (s *Server) createGroup(w http.ResponseWriter, r *http.Request, a *authed) {
+	ip := s.clientIP(r)
 	if s.cfg.AdminTokenHash != "" {
+		if s.rlAdm.count("adm|"+ip, time.Hour, s.now()) >= s.cfg.AdminFailsPerHour {
+			s.m.rateLimited.Add(1)
+			errRateLimited.write(w)
+			return
+		}
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		sum := sha256.Sum256([]byte(tok))
 		if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(s.cfg.AdminTokenHash)) != 1 {
+			s.rlAdm.allow("adm|"+ip, 1<<30, time.Hour, s.now()) // count the failure
 			s.m.authFail.Add(1)
 			errForbidden.write(w)
 			return
 		}
 	}
-	if !s.rlIP.allow("create|"+s.clientIP(r), s.cfg.CreatesPerDay, 24*time.Hour, s.now()) {
+	if !s.rlIP.allow("create|"+ip, s.cfg.CreatesPerDay, 24*time.Hour, s.now()) {
 		s.m.rateLimited.Add(1)
 		errRateLimited.write(w)
 		return
@@ -253,6 +356,9 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request, a *authed) 
 }
 
 func (s *Server) createJoinToken(w http.ResponseWriter, _ *http.Request, a *authed) {
+	if !s.deviceLimit(w, a) {
+		return
+	}
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
 		errUnavailable.write(w)
@@ -260,11 +366,17 @@ func (s *Server) createJoinToken(w http.ResponseWriter, _ *http.Request, a *auth
 	}
 	tok := proto.B64(raw)
 	exp := s.now().Add(s.cfg.JoinTokenTTL)
-	if err := s.st.AddJoinToken(a.gid, hashToken(tok), exp); err != nil {
+	switch err := s.st.AddJoinToken(a.gid, hashToken(tok), exp, s.cfg.MaxActiveTokens); {
+	case errors.Is(err, store.ErrQuota):
+		s.m.quotaDenied.Add(1)
+		e := errQuota
+		e.extra = map[string]any{"limit": "tokens"}
+		e.write(w)
+	case err != nil:
 		errUnavailable.write(w)
-		return
+	default:
+		writeJSON(w, 201, map[string]any{"token": tok, "expiresAt": exp.Unix()})
 	}
-	writeJSON(w, 201, map[string]any{"token": tok, "expiresAt": exp.Unix()})
 }
 
 func hashToken(t string) string {
@@ -281,7 +393,14 @@ func (s *Server) join(w http.ResponseWriter, _ *http.Request, a *authed) {
 		errForbidden.write(w) // identical to a bad token: no oracle
 		return
 	}
-	ok, err := s.st.Join(a.gid, hashToken(req.Token), a.pub, req.NameEnc)
+	ok, err := s.st.Join(a.gid, hashToken(req.Token), a.pub, req.NameEnc, s.cfg.MaxMembers)
+	if errors.Is(err, store.ErrQuota) {
+		s.m.quotaDenied.Add(1)
+		e := errQuota
+		e.extra = map[string]any{"limit": "members"}
+		e.write(w)
+		return
+	}
 	if err != nil {
 		errUnavailable.write(w)
 		return
@@ -315,6 +434,7 @@ func (s *Server) removeMember(w http.ResponseWriter, r *http.Request, a *authed)
 	case err != nil:
 		errUnavailable.write(w)
 	default:
+		s.hub.kick(a.gid, dev) // the revoked device's open streams end now
 		w.WriteHeader(204)
 	}
 }
@@ -338,6 +458,7 @@ func (s *Server) purge(w http.ResponseWriter, _ *http.Request, a *authed) {
 		errUnavailable.write(w)
 		return
 	}
+	s.hub.kick(a.gid, "")
 	w.WriteHeader(204)
 }
 
@@ -363,6 +484,15 @@ func (s *Server) deviceLimit(w http.ResponseWriter, a *authed) bool {
 	return true
 }
 
+func (s *Server) readLimitDevice(w http.ResponseWriter, a *authed) bool {
+	if !s.rlRead.allow("d|"+a.pub, 120, time.Minute, s.now()) {
+		s.m.rateLimited.Add(1)
+		errRateLimited.write(w)
+		return false
+	}
+	return true
+}
+
 func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, a *authed) {
 	coll, doc, ok := s.docRoute(r)
 	im, ok2 := ifMatch(r)
@@ -378,7 +508,7 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, a *authed) {
 		return
 	}
 	seq, cur, err := s.st.PutDoc(a.gid, coll, doc, a.body, im, s.quota())
-	s.finishWrite(w, a.gid, coll, doc, seq, cur, false, err)
+	s.finishWrite(w, a.gid, seq, cur, err)
 }
 
 func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request, a *authed) {
@@ -392,10 +522,10 @@ func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request, a *authed) {
 		return
 	}
 	seq, cur, err := s.st.DeleteDoc(a.gid, coll, doc, im)
-	s.finishWrite(w, a.gid, coll, doc, seq, cur, true, err)
+	s.finishWrite(w, a.gid, seq, cur, err)
 }
 
-func (s *Server) finishWrite(w http.ResponseWriter, gid, coll, doc string, seq, cur int64, deleted bool, err error) {
+func (s *Server) finishWrite(w http.ResponseWriter, gid string, seq, cur int64, err error) {
 	switch {
 	case errors.Is(err, store.ErrConflict):
 		s.m.conflicts.Add(1)
@@ -412,7 +542,7 @@ func (s *Server) finishWrite(w http.ResponseWriter, gid, coll, doc string, seq, 
 	case err != nil:
 		errUnavailable.write(w)
 	default:
-		s.hub.publish(gid, event{Collection: coll, DocID: doc, Seq: seq, Deleted: deleted})
+		s.hub.notify(gid)
 		writeJSON(w, 200, map[string]any{"seq": seq})
 	}
 }
@@ -421,6 +551,9 @@ func (s *Server) getDoc(w http.ResponseWriter, r *http.Request, a *authed) {
 	coll, doc, ok := s.docRoute(r)
 	if !ok {
 		errBadRequest.write(w)
+		return
+	}
+	if !s.readLimitDevice(w, a) {
 		return
 	}
 	d, err := s.st.GetDoc(a.gid, coll, doc)
@@ -440,12 +573,15 @@ func (s *Server) getDoc(w http.ResponseWriter, r *http.Request, a *authed) {
 }
 
 func (s *Server) changes(w http.ResponseWriter, r *http.Request, a *authed) {
+	if !s.readLimitDevice(w, a) {
+		return
+	}
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 	limit := 500
 	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v < 500 {
 		limit = v
 	}
-	items, more, err := s.st.Changes(a.gid, since, limit)
+	items, more, err := s.st.Changes(a.gid, since, limit, s.cfg.ChangesMaxBytes)
 	if err != nil {
 		errUnavailable.write(w)
 		return
@@ -477,9 +613,24 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, a *authed) {
 		errUnavailable.write(w)
 		return
 	}
+	if !s.rlRead.allow("s|"+a.pub, 30, time.Minute, s.now()) { // opening streams is a read like any other
+		s.m.rateLimited.Add(1)
+		errRateLimited.write(w)
+		return
+	}
+	sub, unsub, ok := s.hub.subscribe(a.gid, a.pub, s.cfg.MaxStreamsDevice, s.cfg.MaxStreamsGroup)
+	if !ok {
+		s.m.quotaDenied.Add(1)
+		e := errQuota
+		e.extra = map[string]any{"limit": "streams"}
+		e.write(w)
+		return
+	}
+	defer unsub()
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Time{})
+	arm := func() { _ = rc.SetWriteDeadline(s.now().Add(30 * time.Second)) }
+	arm()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -487,48 +638,52 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, a *authed) {
 	s.m.sseClients.Add(1)
 	defer s.m.sseClients.Add(-1)
 
-	ch, unsub := s.hub.subscribe(a.gid)
-	defer unsub()
 	last := since
-	send := func(e event) bool {
-		if e.Seq <= last {
-			return true
-		}
-		b, _ := json.Marshal(e)
-		if _, err := fmt.Fprintf(w, "id: %d\nevent: change\ndata: %s\n\n", e.Seq, b); err != nil {
-			return false
-		}
-		last = e.Seq
-		fl.Flush()
-		return true
-	}
-	// Replay anything missed since the cursor, then follow live.
-	for {
-		items, more, err := s.st.Changes(a.gid, last, 500)
-		if err != nil {
-			return
-		}
-		for _, d := range items {
-			if !send(event{Collection: d.Collection, DocID: d.DocID, Seq: d.Seq, Deleted: d.Deleted}) {
-				return
+	// The signal only wakes us; the cursor is always re-read from /changes.
+	drain := func() bool {
+		for {
+			items, more, err := s.st.ChangesMeta(a.gid, last, 500)
+			if err != nil {
+				return false
+			}
+			for _, d := range items {
+				b, _ := json.Marshal(event{Collection: d.Collection, DocID: d.DocID, Seq: d.Seq, Deleted: d.Deleted})
+				arm()
+				if _, err := fmt.Fprintf(w, "id: %d\nevent: change\ndata: %s\n\n", d.Seq, b); err != nil {
+					return false
+				}
+				last = d.Seq
+			}
+			fl.Flush()
+			if !more {
+				return true
 			}
 		}
-		if !more {
-			break
-		}
 	}
-	fl.Flush()
+	if !drain() {
+		return
+	}
 	tick := time.NewTicker(25 * time.Second)
 	defer tick.Stop()
+	maxLife := time.NewTimer(s.cfg.MaxStreamDuration)
+	defer maxLife.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case e := <-ch:
-			if !send(e) {
+		case <-sub.kicked:
+			return
+		case <-maxLife.C: // the client reconnects; revocation can never be dodged for long
+			return
+		case <-sub.wake:
+			if !drain() {
 				return
 			}
 		case <-tick.C:
+			if member, _, err := s.st.IsMember(a.gid, a.pub); err != nil || !member {
+				return
+			}
+			arm()
 			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
 				return
 			}
@@ -549,9 +704,15 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request, a *authed) {
 		return
 	}
 	switch err := s.st.PutBlob(a.gid, id, a.body, s.quota()); {
+	case errors.Is(err, store.ErrTooLarge):
+		errTooLarge.write(w)
 	case errors.Is(err, store.ErrQuota):
 		s.m.quotaDenied.Add(1)
-		errQuota.write(w)
+		e := errQuota
+		e.extra = map[string]any{"limit": "group"}
+		e.write(w)
+	case errors.Is(err, store.ErrNotFound):
+		errNotFound.write(w)
 	case err != nil:
 		errUnavailable.write(w)
 	default:
@@ -565,6 +726,9 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request, a *authed) {
 		errBadRequest.write(w)
 		return
 	}
+	if !s.readLimitDevice(w, a) {
+		return
+	}
 	f, st, err := s.st.OpenBlob(a.gid, id)
 	if err != nil {
 		errNotFound.write(w)
@@ -572,7 +736,8 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request, a *authed) {
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeContent(w, r, "", st.ModTime(), f) // handles Range
+	http.ServeContent(w, r, "", time.Time{}, f) // handles Range; no mtime leaked
+	_ = st
 }
 
 func (s *Server) deleteBlob(w http.ResponseWriter, r *http.Request, a *authed) {
@@ -594,7 +759,9 @@ func (s *Server) deleteBlob(w http.ResponseWriter, r *http.Request, a *authed) {
 // ---------- public community ratings (§9) ----------
 
 func (s *Server) putVote(w http.ResponseWriter, r *http.Request) {
-	if !s.rlVote.allow("v|"+s.clientIP(r), s.cfg.VotesPerMin, time.Minute, s.now()) {
+	ip := s.clientIP(r)
+	if !s.rlVote.allow("v|"+ip, s.cfg.VotesPerMin, time.Minute, s.now()) ||
+		!s.rlDay.allow("d|"+ip, s.cfg.VotesPerDay, 24*time.Hour, s.now()) {
 		s.m.rateLimited.Add(1)
 		errRateLimited.write(w)
 		return
@@ -607,10 +774,12 @@ func (s *Server) putVote(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		P string   `json:"p"`
 		R *float64 `json:"r"`
+		T int64    `json:"t"`
 		N uint64   `json:"n"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
-	if err := dec.Decode(&req); err != nil {
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || dec.More() {
 		errBadRequest.write(w)
 		return
 	}
@@ -622,16 +791,25 @@ func (s *Server) putVote(w http.ResponseWriter, r *http.Request) {
 		errBadRequest.write(w)
 		return
 	}
-	if !proto.PowOK(key, req.P, req.R, req.N, s.cfg.PowBits) {
+	if d := s.now().Sub(time.Unix(req.T, 0)); d > voteSkew || d < -voteSkew {
+		errBadRequest.write(w)
+		return
+	}
+	if !proto.PowOK(key, req.P, req.R, req.T, req.N, s.cfg.PowBits) {
 		errForbidden.write(w)
 		return
 	}
-	if err := s.st.PutRating(key, req.P, req.R); err != nil {
+	switch err := s.st.PutRating(key, req.P, req.R, req.T, s.cfg.MaxRatings); {
+	case errors.Is(err, store.ErrStale):
+		errConflict.write(w) // an equal or older vote never replaces a newer one
+	case errors.Is(err, store.ErrFull):
 		errUnavailable.write(w)
-		return
+	case err != nil:
+		errUnavailable.write(w)
+	default:
+		s.m.votes.Add(1)
+		w.WriteHeader(204)
 	}
-	s.m.votes.Add(1)
-	w.WriteHeader(204)
 }
 
 func (s *Server) readLimit(w http.ResponseWriter, r *http.Request) bool {
@@ -690,22 +868,35 @@ func (s *Server) queryRatings(w http.ResponseWriter, r *http.Request) {
 
 // Maintain runs periodic housekeeping until stop is closed.
 func (s *Server) Maintain(stop <-chan struct{}) {
-	t := time.NewTicker(time.Hour)
-	defer t.Stop()
+	minute := time.NewTicker(time.Minute)
+	defer minute.Stop()
+	var ticks int
 	for {
 		select {
 		case <-stop:
 			return
-		case <-t.C:
+		case <-minute.C:
+			ticks++
 			now := s.now()
 			s.nonces.sweep(nonceTTL, now)
-			s.rlDev.sweep(time.Hour, now)
-			s.rlVote.sweep(time.Hour, now)
-			s.rlRead.sweep(time.Hour, now)
+			s.rlAny.sweep(5*time.Minute, now)
+			s.rlDev.sweep(5*time.Minute, now)
+			s.rlRead.sweep(5*time.Minute, now)
+			s.rlVote.sweep(5*time.Minute, now)
+			s.rlDay.sweep(25*time.Hour, now)
+			s.rlAdm.sweep(2*time.Hour, now)
 			s.rlIP.sweep(48*time.Hour, now)
-			ids, _ := s.st.PurgeInactive(now.Add(-time.Duration(s.cfg.RetentionDays) * 24 * time.Hour))
-			s.m.purgedGroups.Add(int64(len(ids)))
-			s.m.lastPurgeUnix.Store(now.Unix())
+			if ticks%60 == 0 { // hourly
+				ids, _ := s.st.PurgeInactive(now.Add(-time.Duration(s.cfg.RetentionDays) * 24 * time.Hour))
+				s.m.purgedGroups.Add(int64(len(ids)))
+				for _, id := range ids {
+					s.hub.kick(id, "")
+				}
+				if s.cfg.TombstoneDays > 0 {
+					_, _ = s.st.PurgeTombstones(now.Add(-time.Duration(s.cfg.TombstoneDays) * 24 * time.Hour))
+				}
+				s.m.lastPurgeUnix.Store(now.Unix())
+			}
 		}
 	}
 }
@@ -729,9 +920,11 @@ func (s *Server) MetricsHandler() http.Handler {
 		p("sync_bytes", "gauge", "Stored ciphertext bytes", bytes)
 		p("sync_community_ratings", "gauge", "Public rating votes stored", ratings)
 		p("sync_sse_clients", "gauge", "Connected SSE clients", s.m.sseClients.Load())
+		p("sync_in_flight", "gauge", "Requests being served", s.m.inFlight.Load())
 		p("sync_requests_2xx_total", "counter", "Responses 2xx/3xx", s.m.req2xx.Load())
 		p("sync_requests_4xx_total", "counter", "Responses 4xx", s.m.req4xx.Load())
 		p("sync_requests_5xx_total", "counter", "Responses 5xx", s.m.req5xx.Load())
+		p("sync_shed_total", "counter", "Requests refused because the server was saturated", s.m.shed.Load())
 		p("sync_rate_limited_total", "counter", "Rate-limited requests", s.m.rateLimited.Load())
 		p("sync_auth_failures_total", "counter", "Authentication or membership failures", s.m.authFail.Load())
 		p("sync_conflicts_total", "counter", "If-Match conflicts", s.m.conflicts.Load())

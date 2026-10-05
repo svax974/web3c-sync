@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -32,12 +33,30 @@ type Config struct {
 	TrustProxy     bool
 	RealIPHeader   string
 	JoinTokenTTL   time.Duration
+
+	ReqsPerMin        int // all requests, per client address
+	MaxStreamsDevice  int
+	MaxStreamsGroup   int
+	MaxStreamDuration time.Duration
+	MaxMembers        int
+	MaxActiveTokens   int
+	MaxRowsFactor     int // docs rows (live + tombstones) <= factor * MaxDocs
+	MaxBlobs          int
+	BlobMinCost       int64
+	TombstoneDays     int
+	ChangesMaxBytes   int64
+	MaxInFlight       int
+	VotesPerDay       int
+	MaxRatings        int
+	AdminFailsPerHour int
+	TrustedProxies    []*net.IPNet
+	OpenRegistration  bool
 }
 
 var defaultMaxDocs = map[string]int{"iptv": 20000, "banking": 5000, "aiteam": 5000}
 
 var defaultCollections = map[string]string{
-	"iptv": "profiles,progress,ratings,favorites,lists,order,sources,prefs,_name",
+	"iptv": "profiles,progress,ratings,favorites,lists,order,sources,prefs",
 }
 
 func env(k, d string) string {
@@ -98,6 +117,18 @@ func Load() (*Config, error) {
 		{&c.CreatesPerDay, "SYNC_CREATES_PER_DAY", 20},
 		{&c.VotesPerMin, "SYNC_VOTES_PER_MIN", 30},
 		{&c.RetentionDays, "SYNC_RETENTION_DAYS", 365},
+		{&c.ReqsPerMin, "SYNC_REQS_PER_MIN", 600},
+		{&c.MaxStreamsDevice, "SYNC_MAX_STREAMS_PER_DEVICE", 3},
+		{&c.MaxStreamsGroup, "SYNC_MAX_STREAMS_PER_GROUP", 20},
+		{&c.MaxMembers, "SYNC_MAX_MEMBERS", 50},
+		{&c.MaxActiveTokens, "SYNC_MAX_ACTIVE_TOKENS", 5},
+		{&c.MaxRowsFactor, "SYNC_MAX_ROWS_FACTOR", 2},
+		{&c.MaxBlobs, "SYNC_MAX_BLOBS", 200},
+		{&c.TombstoneDays, "SYNC_TOMBSTONE_DAYS", 180},
+		{&c.MaxInFlight, "SYNC_MAX_IN_FLIGHT", 256},
+		{&c.VotesPerDay, "SYNC_VOTES_PER_DAY", 2000},
+		{&c.MaxRatings, "SYNC_MAX_RATINGS", 5000000},
+		{&c.AdminFailsPerHour, "SYNC_ADMIN_FAILS_PER_HOUR", 10},
 	} {
 		if *p.dst, err = envInt(p.k, p.d); err != nil {
 			return nil, err
@@ -108,6 +139,20 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.MaxBytes = int64(mb) << 20
+	c.MaxStreamDuration = time.Hour
+	c.BlobMinCost = 4096
+	c.ChangesMaxBytes = 4 << 20
+	c.OpenRegistration = env("SYNC_OPEN_REGISTRATION", "false") == "true"
+	if c.TrustProxy {
+		list := env("SYNC_TRUSTED_PROXIES", "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
+		for _, x := range strings.Split(list, ",") {
+			_, n, err := net.ParseCIDR(strings.TrimSpace(x))
+			if err != nil {
+				return nil, fmt.Errorf("SYNC_TRUSTED_PROXIES: %w", err)
+			}
+			c.TrustedProxies = append(c.TrustedProxies, n)
+		}
+	}
 	kb, err := envInt("SYNC_MAX_DOC_KIB", 256)
 	if err != nil {
 		return nil, err

@@ -75,13 +75,17 @@ func TestSignVerify(t *testing.T) {
 
 func TestPow(t *testing.T) {
 	r := 4.0
-	n := SolvePow("movie:tmdb:1", "p", &r, 10)
-	if !PowOK("movie:tmdb:1", "p", &r, n, 10) {
+	n := SolvePow("movie:tmdb:1", "p", &r, 1000, 10)
+	if !PowOK("movie:tmdb:1", "p", &r, 1000, n, 10) {
 		t.Fatal("pow")
 	}
 	r2 := 5.0
-	if PowOK("movie:tmdb:1", "p", &r2, n, 10) && PowOK("movie:tmdb:1", "p", &r2, n, 20) {
+	if PowOK("movie:tmdb:1", "p", &r2, 1000, n, 10) && PowOK("movie:tmdb:1", "p", &r2, 1000, n, 20) {
 		t.Fatal("pow not bound to rating")
+	}
+	// The proof is bound to the timestamp: a captured vote cannot be re-dated.
+	if PowOK("movie:tmdb:1", "p", &r, 1001, n, 10) && PowOK("movie:tmdb:1", "p", &r, 1002, n, 10) && PowOK("movie:tmdb:1", "p", &r, 1003, n, 10) {
+		t.Fatal("pow not bound to timestamp")
 	}
 }
 

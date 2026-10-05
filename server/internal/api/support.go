@@ -43,7 +43,12 @@ var (
 	errUnavailable  = apiError{status: 503, code: "unavailable"}
 )
 
-// ---------- fixed-window rate limiter (memory only) ----------
+// ---------- fixed-window rate limiter (memory only, bounded) ----------
+
+const (
+	maxLimiterKeys = 200_000
+	maxKeyLen      = 96
+)
 
 type window struct {
 	start time.Time
@@ -57,11 +62,19 @@ type limiter struct {
 
 func newLimiter() *limiter { return &limiter{m: map[string]*window{}} }
 
+// allow counts a hit and reports whether it is within limit/per. A full table
+// refuses new keys (fails closed) instead of growing without bound.
 func (l *limiter) allow(key string, limit int, per time.Duration, now time.Time) bool {
+	if len(key) > maxKeyLen {
+		key = key[:maxKeyLen]
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	w := l.m[key]
 	if w == nil || now.Sub(w.start) >= per {
+		if w == nil && len(l.m) >= maxLimiterKeys {
+			return false
+		}
 		l.m[key] = &window{start: now, n: 1}
 		return true
 	}
@@ -70,6 +83,19 @@ func (l *limiter) allow(key string, limit int, per time.Duration, now time.Time)
 	}
 	w.n++
 	return true
+}
+
+// count returns the hits recorded in the current window without adding one.
+func (l *limiter) count(key string, per time.Duration, now time.Time) int {
+	if len(key) > maxKeyLen {
+		key = key[:maxKeyLen]
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if w := l.m[key]; w != nil && now.Sub(w.start) < per {
+		return w.n
+	}
+	return 0
 }
 
 func (l *limiter) sweep(older time.Duration, now time.Time) {
@@ -82,7 +108,9 @@ func (l *limiter) sweep(older time.Duration, now time.Time) {
 	}
 }
 
-// ---------- replay protection ----------
+// ---------- replay protection (bounded) ----------
+
+const maxNonces = 500_000
 
 type nonceCache struct {
 	mu sync.Mutex
@@ -91,15 +119,20 @@ type nonceCache struct {
 
 func newNonceCache() *nonceCache { return &nonceCache{m: map[string]time.Time{}} }
 
-// seen records key and reports whether it was already present.
-func (c *nonceCache) seen(key string, now time.Time, ttl time.Duration) bool {
+// seen records key; dup is true when it was already present inside ttl, full
+// when the cache is saturated (the caller must refuse rather than evict, so a
+// flood can never make an old nonce replayable).
+func (c *nonceCache) seen(key string, now time.Time, ttl time.Duration) (dup, full bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if t, ok := c.m[key]; ok && now.Sub(t) < ttl {
-		return true
+		return true, false
+	}
+	if len(c.m) >= maxNonces {
+		return false, true
 	}
 	c.m[key] = now
-	return false
+	return false, false
 }
 
 func (c *nonceCache) sweep(ttl time.Duration, now time.Time) {
@@ -121,40 +154,74 @@ type event struct {
 	Deleted    bool   `json:"deleted"`
 }
 
-type hub struct {
-	mu   sync.Mutex
-	subs map[string]map[chan event]struct{}
+// subscriber is one open stream. wake only says "something changed": the
+// handler re-reads /changes from its own cursor, so a dropped or reordered
+// signal can never lose a document.
+type subscriber struct {
+	gid, pub string
+	wake     chan struct{}
+	kicked   chan struct{}
+	once     sync.Once
 }
 
-func newHub() *hub { return &hub{subs: map[string]map[chan event]struct{}{}} }
+func (s *subscriber) kick() { s.once.Do(func() { close(s.kicked) }) }
 
-func (h *hub) subscribe(gid string) (chan event, func()) {
-	ch := make(chan event, 128)
+type hub struct {
+	mu   sync.Mutex
+	subs map[string]map[*subscriber]struct{}
+}
+
+func newHub() *hub { return &hub{subs: map[string]map[*subscriber]struct{}{}} }
+
+// subscribe registers a stream, enforcing the per-device and per-group caps.
+func (h *hub) subscribe(gid, pub string, maxDevice, maxGroup int) (*subscriber, func(), bool) {
 	h.mu.Lock()
-	if h.subs[gid] == nil {
-		h.subs[gid] = map[chan event]struct{}{}
+	defer h.mu.Unlock()
+	group := h.subs[gid]
+	perDev := 0
+	for s := range group {
+		if s.pub == pub {
+			perDev++
+		}
 	}
-	h.subs[gid][ch] = struct{}{}
-	h.mu.Unlock()
-	return ch, func() {
+	if len(group) >= maxGroup || perDev >= maxDevice {
+		return nil, nil, false
+	}
+	sub := &subscriber{gid: gid, pub: pub, wake: make(chan struct{}, 1), kicked: make(chan struct{})}
+	if group == nil {
+		group = map[*subscriber]struct{}{}
+		h.subs[gid] = group
+	}
+	group[sub] = struct{}{}
+	return sub, func() {
 		h.mu.Lock()
-		delete(h.subs[gid], ch)
+		delete(h.subs[gid], sub)
 		if len(h.subs[gid]) == 0 {
 			delete(h.subs, gid)
 		}
 		h.mu.Unlock()
+	}, true
+}
+
+// notify wakes every stream of the group; never blocks.
+func (h *hub) notify(gid string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for s := range h.subs[gid] {
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
 	}
 }
 
-// publish never blocks; a full subscriber simply misses events and catches up
-// through /changes on reconnect.
-func (h *hub) publish(gid string, e event) {
+// kick closes the streams of one device (pub != "" ) or of the whole group.
+func (h *hub) kick(gid, pub string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for ch := range h.subs[gid] {
-		select {
-		case ch <- e:
-		default:
+	for s := range h.subs[gid] {
+		if pub == "" || s.pub == pub {
+			s.kick()
 		}
 	}
 }
@@ -166,7 +233,7 @@ type metrics struct {
 	rateLimited, authFail, conflicts atomic.Int64
 	quotaDenied, votes               atomic.Int64
 	purgedGroups, lastPurgeUnix      atomic.Int64
-	sseClients                       atomic.Int64
+	sseClients, inFlight, shed       atomic.Int64
 }
 
 type statusRecorder struct {
@@ -184,15 +251,34 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 
 // ---------- client address ----------
 
+// clientIP returns the address used for rate limiting: the TCP peer, or — only
+// when that peer is a trusted proxy — the validated forwarded address. IPv6 is
+// reduced to its /64 so one subscriber cannot mint 2^64 "addresses".
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg.TrustProxy {
-		if v := r.Header.Get(s.cfg.RealIPHeader); v != "" {
-			return v
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && s.cfg.TrustProxy && s.trusted(ip) {
+		if fwd := net.ParseIP(r.Header.Get(s.cfg.RealIPHeader)); fwd != nil {
+			ip = fwd
 		}
 	}
-	h, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+	if ip == nil {
+		return "invalid"
 	}
-	return h
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+func (s *Server) trusted(ip net.IP) bool {
+	for _, n := range s.cfg.TrustedProxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

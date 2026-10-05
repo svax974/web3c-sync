@@ -37,9 +37,11 @@ func main() {
 	env, _ := proto.Seal(keys.Enc, aad, pt, nonce)
 
 	// Application-level document (with the logical id "k") and a device name.
-	appPT := []byte(`{"v":1,"u":1760000000000,"k":"` + "p1/movie_1234" + `","d":{"pos":120,"dur":5400,"done":false}}`)
+	appPT := []byte(`{"v":1,"u":1760000000000,"c":3,"k":"` + "p1/movie_1234" + `","d":{"pos":120,"dur":5400,"done":false}}`)
+	delPT := []byte(`{"v":1,"u":1760000100000,"c":4,"k":"` + "p1/movie_1234" + `","del":true}`)
 	appDoc := proto.DocID(keys.ID, "progress", "p1/movie_1234")
 	appEnv, _ := proto.Seal(keys.Enc, proto.AAD(instance, group, "progress", appDoc), appPT, seq(0xB0, 12))
+	delEnv, _ := proto.Seal(keys.Enc, proto.AAD(instance, group, "progress", appDoc), delPT, seq(0xB1, 12))
 	devPub := proto.B64(ed25519.NewKeyFromSeed(seq(0x10, 32)).Public().(ed25519.PublicKey))
 	nameEnv, _ := proto.Seal(keys.Name, proto.AAD(instance, group, "_name", devPub), []byte("Apple TV salon"), seq(0xC0, 12))
 
@@ -52,14 +54,15 @@ func main() {
 	canon := proto.Canonical("PUT", path, ts, nn, proto.BodyHash(body), instance)
 
 	r := 7.5
-	pseud := proto.Pseudonym(keys.ID, "profile-1", "movie:tmdb:603")
-	n := proto.SolvePow("movie:tmdb:603", pseud, &r, 12)
+	const voteT = int64(1760000000)
+	pseud := proto.Pseudonym(keys.Rating, "profile-1", "movie:tmdb:603")
+	n := proto.SolvePow("movie:tmdb:603", pseud, &r, voteT, 12)
 
 	powCases := []map[string]any{}
 	for _, c := range []struct{ r *float64 }{{ptr(7)}, {ptr(7.5)}, {ptr(0)}, {nil}} {
-		nn := proto.SolvePow("movie:tmdb:603", pseud, c.r, 12)
-		d := proto.PowDigest("movie:tmdb:603", pseud, c.r, nn)
-		m := map[string]any{"ratingText": proto.RatingText(c.r), "n": nn, "digest": proto.B64(d[:])}
+		nn := proto.SolvePow("movie:tmdb:603", pseud, c.r, voteT, 12)
+		d := proto.PowDigest("movie:tmdb:603", pseud, c.r, voteT, nn)
+		m := map[string]any{"ratingText": proto.RatingText(c.r), "t": voteT, "n": nn, "digest": proto.B64(d[:])}
 		if c.r != nil {
 			m["r"] = *c.r
 		} else {
@@ -78,7 +81,7 @@ func main() {
 		"version": "web3c-sync/v1",
 		"hkdf": map[string]any{
 			"kg": proto.B64(kg), "enc": proto.B64(keys.Enc),
-			"id": proto.B64(keys.ID), "name": proto.B64(keys.Name),
+			"id": proto.B64(keys.ID), "name": proto.B64(keys.Name), "rating": proto.B64(keys.Rating),
 		},
 		"docId": map[string]any{
 			"collection": coll, "logicalId": logical, "docId": docID,
@@ -87,6 +90,10 @@ func main() {
 			"instance": instance, "groupId": group, "collection": "progress",
 			"logicalId": "p1/movie_1234", "docId": appDoc,
 			"plaintext": string(appPT), "nonce": proto.B64(seq(0xB0, 12)), "envelope": proto.B64(appEnv),
+		},
+		"sealDel": map[string]any{
+			"collection": "progress", "logicalId": "p1/movie_1234", "docId": appDoc,
+			"plaintext": string(delPT), "nonce": proto.B64(seq(0xB1, 12)), "envelope": proto.B64(delEnv),
 		},
 		"deviceName": map[string]any{
 			"instance": instance, "groupId": group, "devicePub": devPub,
@@ -106,10 +113,10 @@ func main() {
 		},
 		"ratingCases": powCases,
 		"rating": map[string]any{
-			"profileId": "profile-1", "contentKey": "movie:tmdb:603", "kUser": "id",
+			"profileId": "profile-1", "contentKey": "movie:tmdb:603", "kRating": "rating", "t": voteT,
 			"pseudonym": pseud, "r": r, "ratingText": proto.RatingText(&r),
 			"powBits": 12, "n": n,
-			"digest": proto.B64(func() []byte { d := proto.PowDigest("movie:tmdb:603", pseud, &r, n); return d[:] }()),
+			"digest": proto.B64(func() []byte { d := proto.PowDigest("movie:tmdb:603", pseud, &r, voteT, n); return d[:] }()),
 		},
 	}
 	enc := json.NewEncoder(os.Stdout)

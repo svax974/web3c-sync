@@ -37,6 +37,7 @@ nature (agrégat entre inconnus).
 | `K_enc` | `HKDF(ikm=K_g, salt="web3c-sync/v1", info="enc", L=32)` |
 | `K_id` | `HKDF(ikm=K_g, salt="web3c-sync/v1", info="id", L=32)` |
 | `K_name` | `HKDF(ikm=K_g, salt="web3c-sync/v1", info="name", L=32)` (noms d'appareils) |
+| `K_rating` | `HKDF(ikm=K_g, salt="web3c-sync/v1", info="rating", L=32)` (pseudonymes des notes publiques ; ne sert qu'à cela) |
 | clé d'appareil | paire Ed25519, générée à l'appairage, stockée dans le coffre de l'OS. `devicePub` = 32 octets. |
 
 ## 3. Chiffrement d'un document
@@ -59,13 +60,30 @@ longueur < 1 + 12 + 16 + 1, ou dont l'authentification échoue. Les erreurs ne
 révèlent pas la cause.
 
 Le contenu en clair (`plaintext`) d'un document de synchro est un JSON :
-`{"v":1,"u":<updatedAt epoch ms>,"k":"<identifiant logique>","d":<charge utile>}`.
-`k` est l'identifiant logique dont `docId` est le HMAC (§4) : `docId` n'étant pas
-réversible, c'est `k` qui permet à un autre appareil de savoir à quoi correspond
-un document reçu ; le client **doit** vérifier que `HMAC(K_id, collection, k)`
-égale le `docId` reçu. Une suppression est portée par le serveur (§7), pas par le
-contenu ; un tombstone ne porte pas de `k` : le client retrouve l'élément local
-par son `docId` (index local `docId → k`) et ignore un tombstone inconnu.
+`{"v":1,"u":<epoch ms>,"c":<compteur>,"k":"<identifiant logique>","d":<charge utile>}`
+ou, pour une suppression, `{"v":1,"u":<epoch ms>,"c":<compteur>,"k":"…","del":true}`
+(sans `d`).
+
+- `k` est l'identifiant logique dont `docId` est le HMAC (§4) : `docId` n'étant pas
+  réversible, c'est `k` qui permet à un autre appareil de savoir à quoi correspond
+  un document reçu ; le client **doit** vérifier que `HMAC(K_id, collection, k)`
+  égale le `docId` reçu.
+- `u` : instant de la modification, fixé par l'appareil. À la réception, un `u` au-delà
+  de `now + 5 min` est ramené à `now + 5 min` pour toute comparaison (une horloge
+  en avance ne peut pas gagner définitivement).
+- `c` : **compteur par document**, strictement croissant : `c = max(c local, c lu
+  sur le serveur) + 1` à chaque écriture. Un client mémorise le plus grand `c` vu
+  pour chaque `docId` et **rejette** (sans appliquer, en le signalant) tout document
+  reçu dont `c` est inférieur : c'est un retour en arrière, que seul le serveur
+  peut provoquer.
+- **Suppression authentifiée** : un client supprime un élément en écrivant (PUT) le
+  marqueur `del:true` chiffré. Ce marqueur suit les règles ordinaires (`u`,
+  `c`, `If-Match`). Un **tombstone créé par le serveur** (§7, `DELETE`) n'est pas
+  authentifié : les clients v1 **ne le publient jamais et l'ignorent** à la lecture
+  (ils le signalent). Seul un marqueur `del` déchiffré supprime un élément local.
+- **Mémoire de curseur** : un client mémorise, par groupe, le plus grand `next` et
+  le plus grand `seq` (`info`) vus, et refuse (erreur `rollback`) toute réponse qui
+  les fait diminuer.
 
 ## 4. Identifiant de document pseudonymisé
 
@@ -97,9 +115,13 @@ web3c-sync/v1\n
 <instance>
 ```
 
-Le serveur refuse (401) si : signature invalide, |now − timestamp| > 120 s, nonce
-déjà vu dans la fenêtre, ou (hors `join` et création) `devicePub` non membre du
-groupe de l'URL. Le corps vide hache `e3b0c442…b855`. Le chemin signé est celui **reçu par le serveur** :
+Le serveur refuse **401** si : un en-tête manque, `X-Device` ou `X-Nonce` n'est pas
+en base64url **canonique** (la ré-encodée doit être identique, sinon une même clé
+aurait plusieurs identités), |now − timestamp| > 120 s, signature invalide, nonce
+déjà vu dans la fenêtre ; **403** si (hors `join` et création) `devicePub` n'est
+pas membre du groupe de l'URL. L'appartenance est vérifiée **avant** la lecture
+d'un corps volumineux, et le nonce n'est mémorisé qu'après authentification
+complète. Le corps vide hache `e3b0c442…b855`. Le chemin signé est celui **reçu par le serveur** :
 un reverse proxy ne doit ni retirer ni ajouter de préfixe (les trois domaines
 `sync-*.web3c.cc` sont servis à la racine).
 
@@ -123,7 +145,8 @@ Le propriétaire est membre d'office.
   `Seal(K_name, AAD(instance, groupId, "_name", devicePub), nom UTF-8)` (`devicePub`
   en base64url comme docId de l'AAD), signée
   par la nouvelle clé (preuve de possession). 200 : l'appareil devient membre.
-  Jeton déjà utilisé, expiré ou inconnu : 403 identique (pas d'oracle).
+  Jeton déjà utilisé, expiré ou inconnu : 403 identique (pas d'oracle). Au plus 5 jetons
+  valides à la fois par groupe et 50 membres par groupe (429 `quota`, `limit`: `tokens`/`members`).
 - QR / code d'appairage : `web3c-link:v1?s=<urlServeur>&i=<instance>&g=<groupId>&t=<token>&k=<K_g>[&f=<empreinteTLS>]`, où `f` est l'empreinte SHA-256 du certificat serveur (DER, feuille)
   encodée en base64url sans remplissage ; les clients tolèrent aussi l'hexadécimal.
 
@@ -155,19 +178,32 @@ Chaque écriture dans un groupe incrémente un compteur `seq` du groupe.
 - `GET …` → corps = enveloppe ; en-têtes `X-Seq`, `X-Updated-At`. Un document
   supprimé répond **410** avec `X-Seq` et `X-Deleted: 1` ; recréer un document
   supprimé exige `If-Match` = ce `X-Seq` (celui du tombstone).
-- `DELETE …` (`If-Match` obligatoire) → tombstone : le contenu est effacé, `deleted`
-  est vrai, `seq` augmente. Les tombstones sont conservés pour la vie du groupe.
+- `DELETE …` (`If-Match` obligatoire) → tombstone **côté serveur** : le contenu est
+  effacé, `deleted` est vrai, `seq` augmente. **Non authentifié** : les clients v1 ne
+  l'utilisent pas pour supprimer un élément (voir §3, marqueur `del`) et l'ignorent à
+  la lecture. Il reste disponible pour le nettoyage (administration). Les tombstones
+  sont purgés après 180 jours.
 - `GET /v1/g/{gid}/changes?since=N&limit=500` (`limit` ≤ 500 ; au-delà ou absent : 500) → `{"items":[{"collection":"…",
   "docId":"…","seq":n,"deleted":bool,"updatedAt":s,"env":"<b64url>"}],
   "next":N',"more":bool}`. `env` absent pour un tombstone. Ordre croissant de
-  `seq`. Un client neuf utilise `since=0`.
+  `seq`. Une page est plafonnée à 4 MiB d'enveloppes (au moins un élément) ;
+  `more` indique qu'il en reste. Un client neuf utilise `since=0`. Un `next` qui
+  ne progresse pas alors que `more` est vrai est une erreur serveur (le client
+  s'arrête).
 - `GET /v1/g/{gid}/stream?since=N` — SSE : `id: <seq>`, événement `change`,
   données `{"collection":"…","docId":"…","seq":n,"deleted":bool}` (sans contenu :
   le client interroge `changes`). Signal de vie `: ping` toutes les 25 s.
-  L'authentification est celle d'une requête GET ordinaire (§5).
+  L'authentification est celle d'une requête GET ordinaire (§5). **Le flux n'est
+  qu'un signal de réveil** : le curseur de synchro est toujours celui de `changes`,
+  jamais celui du flux, et un événement peut être omis ou coalescé. Le serveur
+  ferme le flux d'un appareil révoqué, d'un groupe purgé, et après 1 heure (le
+  client se reconnecte). Plafonds : 3 flux par appareil, 20 par groupe (429
+  `quota`, `limit`: `streams`).
 
 Limites par instance (valeurs par défaut du serveur fourni) : document ≤ 256 KiB,
-≤ 5 000 documents (20 000 pour `iptv`) et ≤ 64 MiB par groupe, ≤ 120 écritures/minute/appareil.
+≤ 5 000 documents (20 000 pour `iptv`) et ≤ 64 MiB par groupe, au plus deux fois
+le plafond de documents en lignes (documents + tombstones), ≤ 200 blobs (chacun
+compté pour au moins 4 Kio), ≤ 120 écritures/minute/appareil, ≤ 120 lectures/minute/appareil.
 Document ou blob plus gros que la limite : **413** `{"error":"too_large"}`.
 Quota de groupe (nombre de documents, octets) : **429** `{"error":"quota","limit":"group"}`.
 Limitation de débit : **429** `{"error":"rate_limited"}`.
@@ -187,27 +223,33 @@ ré-appairer les appareils de confiance, supprimer l'ancien.
 Données en clair, volontairement minimales, sans lien avec un groupe ni un
 appareil.
 
-- `contentKey` : chaîne `[a-z0-9:_.-]{1,128}` choisie par le client (identité
-  du contenu commune aux utilisateurs, ex. `movie:tmdb:603`).
+- `contentKey` : `^(movie|tv|series):tmdb:[0-9]{1,9}$` (identité TMDB du contenu,
+  commune aux utilisateurs, ex. `movie:tmdb:603`). L'espace de clés est borné.
 - **Vote** : `PUT /v1/public/ratings/{contentKey}` (sans signature d'appareil),
-  corps `{"p":"<pseudonyme b64url 32 octets>","r":<note>,"n":<nonce PoW>}`.
-  - `pseudonyme = HMAC-SHA256(K_user, field("rating") || field(profileId) ||
-    field(contentKey))`, où `K_user` est `K_id` si le profil a un groupe, sinon
-    une clé locale aléatoire de l'appareil. Un vote par pseudonyme et par
-    contenu ; un nouveau vote remplace l'ancien.
+  corps `{"p":"<pseudonyme b64url 32 octets>","r":<note>,"t":<epoch s>,"n":<nonce PoW>}`
+  (aucun autre champ).
+  - `pseudonyme = HMAC-SHA256(K_rating, field("rating") || field(profileId) ||
+    field(contentKey))`, où `K_rating` est celui du groupe (§2) si le profil en a
+    un, sinon une clé locale aléatoire de l'appareil. Un vote par pseudonyme et par
+    contenu.
   - `r` : nombre dans `[ratingMin, ratingMax]` de l'instance (par défaut `[0,10]`).
     `r = null` retire le vote.
+  - `t` : instant du vote, |now − t| ≤ 10 min (400 sinon). Un vote dont `t` n'est
+    **pas strictement postérieur** à celui déjà stocké pour ce pseudonyme est refusé
+    (409) : le rejeu d'un vote ancien ne peut pas écraser un plus récent.
   - **Preuve de travail** : `SHA-256(field(contentKey) || field(p) ||
-    canonique(r) || u64(n))` doit avoir au moins `powBits` bits de poids fort à 0
-    (16 par défaut). `canonique(r)` = `r` en texte décimal le plus court
-    (`7`, `7.5`, `null`).
-    Jamais `7.0`, jamais d'exposant.
-  - Limitation de débit par IP (mémoire seule, rien n'est écrit sur disque).
+    canonique(r) || u64(t) || u64(n))` doit avoir au moins `powBits` bits de poids
+    fort à 0 (16 par défaut). `canonique(r)` = `r` en texte décimal le plus court
+    (`7`, `7.5`, `null` ; jamais `7.0`, jamais d'exposant).
+  - Limitation de débit par adresse (mémoire seule) : 30 votes/minute, 2 000/jour.
 - **Lecture** : `GET /v1/public/ratings/{contentKey}` → `{"count":n,"sum":x,
   "avg":x}` ; `POST /v1/public/ratings/query` `{"keys":[…≤100]}` →
   `{"items":{"<key>":{"count":n,"sum":x,"avg":x}}}`.
 - Aucun texte libre. Le serveur ne stocke que `(contentKey, pseudonyme, note,
-  date)`.
+  t)`, et refuse d'en stocker plus d'un nombre global borné.
+- **Limite assumée** : une note publique anonyme n'est pas à l'abri du bourrage
+  (un client peut voter sous N pseudonymes). La preuve de travail, la limitation
+  par adresse et le plafond global en bornent le coût, ne l'annulent pas.
 
 ## 10. Blobs (réservé aux médias chiffrés)
 
@@ -226,10 +268,15 @@ d'échec d'authentification.
 ## 12. Vie privée du serveur
 
 - Aucune adresse IP n'est écrite par le serveur. L'adresse IP vue par le
-  serveur sert à la limitation de débit en mémoire seulement. Les journaux du
-  proxy conservent l'adresse IP **7 jours**.
+  serveur (le pair TCP, ou l'en-tête transmis **uniquement** si le pair est un
+  proxy de confiance configuré ; IPv6 réduit à son /64) sert à la limitation de
+  débit en mémoire seulement. Les journaux du proxy conservent l'adresse IP **7 jours**.
+- La base SQLite est ouverte en `secure_delete` ; l'effacement d'un groupe est
+  physique pour la base, pas pour les sauvegardes (documenter leur durée).
+- Au démarrage, le serveur refuse d'écouter hors boucle locale sans jeton
+  administrateur ni `SYNC_OPEN_REGISTRATION=true` explicite.
 - Aucun contenu, jeton ou clé dans les journaux.
-- Groupes inactifs purgés après **365 jours** (date visible via `/info`).
+- Groupes inactifs purgés après **365 jours** (date visible via `/info`) ; toute requête authentifiée, lecture comprise, compte comme activité.
 
 ## 13. Vecteurs de test
 
@@ -244,3 +291,20 @@ peut donc pas toujours reproduire la signature du vecteur. Il doit alors (1) obt
 la même clé publique depuis la graine, (2) produire la même chaîne canonique,
 (3) **vérifier avec succès** la signature du vecteur, (4) produire une signature
 que sa propre vérification accepte. Le serveur ne fait que vérifier.
+
+## 14. Ce que le protocole garantit, et ce qu'il ne garantit pas
+
+Garanti (revue `SECURITY-REVIEW.md`) : confidentialité du contenu et des identifiants
+logiques face au serveur ; isolation entre groupes ; fraîcheur et non-rejeu des
+requêtes ; un serveur ne peut ni forger un contenu, ni échanger deux documents,
+ni **supprimer** (marqueurs `del` authentifiés), ni **faire reculer** un document
+(compteur `c`) ou le groupe entier (mémoire de curseur) sans que les clients le
+détectent.
+
+Non garanti : un serveur malveillant peut **retarder, cacher** des écritures à certains
+appareils, ou présenter à chacun une vue différente (équivocation) ; la détection
+exigerait un journal signé par les appareils (hors v1). Un appareil **révoqué garde
+`K_g`** et peut déchiffrer ce qu'il a déjà reçu ou qu'un serveur complice lui fournit :
+après une révocation, changer les mots de passe des sources IPTV et créer un nouveau
+groupe (§8). Le serveur voit les noms de collection, la fréquence et la taille
+approximative des écritures, les `docId` (stables par élément) et les adresses IP.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +22,10 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if !loopbackOnly(cfg.Listen) && cfg.AdminTokenHash == "" && !cfg.OpenRegistration {
+		log.Fatalf("refusing to listen on %s without SYNC_ADMIN_TOKEN_SHA256: anyone could create groups. "+
+			"Set the admin token (personal server) or SYNC_OPEN_REGISTRATION=true (public instance)", cfg.Listen)
 	}
 	st, err := store.Open(cfg.DBPath, cfg.BlobDir)
 	if err != nil {
@@ -65,4 +70,17 @@ func main() {
 	if metrics != nil {
 		_ = metrics.Shutdown(ctx)
 	}
+}
+
+// loopbackOnly reports whether addr binds to the loopback interface only.
+func loopbackOnly(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

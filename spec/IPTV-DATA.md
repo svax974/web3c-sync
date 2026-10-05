@@ -57,10 +57,13 @@ modification locale** (jamais à l'instant de la synchro).
 conservés sous `series_{episodeId}` comme aujourd'hui.
 
 ### Suppression
-`DELETE` côté serveur (tombstone). Un appareil qui supprime localement un élément
-publie un `DELETE` ; à réception d'un tombstone, l'élément local est supprimé
-**sauf** si son `u` local est plus récent que le `updatedAt` du tombstone
-(résurrection volontaire).
+Une suppression est un **marqueur chiffré** `{"del":true}` écrit comme n'importe quel
+document (PROTOCOL §3), pas un `DELETE` serveur : le serveur ne peut ainsi pas
+supprimer ni ressusciter un élément à l'insu des appareils. À réception d'un marqueur,
+l'élément local est supprimé **sauf** si son `u` local est plus récent que le `u` du
+marqueur (résurrection volontaire) ; les deux sont en millisecondes. Les tombstones
+créés par le serveur sont ignorés (et signalés). Un marqueur ne porte aucune donnée ;
+son `k` permet de retrouver l'élément.
 
 ### Clés dérivées
 - `sourceKey = base64url(SHA-256(kind + "|" + serveur + "|" + utilisateur)[0..12])`
@@ -98,9 +101,8 @@ tout autre moteur les respecte) :
   existe un changement local non envoyé, ou si l'élément existait localement avant
   d'avoir jamais été synchronisé (il compte alors pour `u = 0` quand il n'a pas
   d'horodatage fiable : profil, liste, source, ordre, réglages).
-- **Tombstone** : l'instant de la suppression est le `updatedAt` du serveur ; un
-  changement local en attente plus récent l'emporte (résurrection). Instant
-  inconnu : la suppression gagne.
+- **Marqueur de suppression** : son `u` (millisecondes, fixé par l'appareil) se compare
+  au `u` local ; un changement local plus récent l'emporte (résurrection).
 - `progress.series` est l'identifiant de série **en texte**. Identifiants de
   contenu : sérialisés en texte dans les clés ; un moteur ignore ceux qu'il ne sait
   pas représenter.

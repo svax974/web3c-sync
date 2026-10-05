@@ -61,7 +61,7 @@ func hkdf(ikm, salt []byte, info string, l int) []byte {
 }
 
 // Keys holds the keys derived from the group secret K_g.
-type Keys struct{ Enc, ID, Name []byte }
+type Keys struct{ Enc, ID, Name, Rating []byte }
 
 func DeriveKeys(kg []byte) Keys {
 	salt := []byte(Version)
@@ -69,6 +69,8 @@ func DeriveKeys(kg []byte) Keys {
 		Enc:  hkdf(kg, salt, "enc", 32),
 		ID:   hkdf(kg, salt, "id", 32),
 		Name: hkdf(kg, salt, "name", 32),
+		// Dedicated to public-rating pseudonyms: never reuse K_id for another purpose.
+		Rating: hkdf(kg, salt, "rating", 32),
 	}
 }
 
@@ -190,13 +192,15 @@ func RatingText(r *float64) string {
 	return strconv.FormatFloat(*r, 'f', -1, 64)
 }
 
-// PowDigest is SHA-256(field(contentKey) || field(p) || canonical(r) || u64(n)) (§9).
-func PowDigest(contentKey, pseudonym string, r *float64, n uint64) [32]byte {
+// PowDigest is SHA-256(field(contentKey) || field(p) || canonical(r) || u64(t) || u64(n)) (§9).
+func PowDigest(contentKey, pseudonym string, r *float64, t int64, n uint64) [32]byte {
 	var buf bytes.Buffer
 	buf.Write(Field([]byte(contentKey)))
 	buf.Write(Field([]byte(pseudonym)))
 	buf.WriteString(RatingText(r))
 	var u [8]byte
+	binary.BigEndian.PutUint64(u[:], uint64(t))
+	buf.Write(u[:])
 	binary.BigEndian.PutUint64(u[:], n)
 	buf.Write(u[:])
 	return sha256.Sum256(buf.Bytes())
@@ -214,22 +218,22 @@ func leadingZeroBits(h [32]byte) int {
 	return n
 }
 
-func PowOK(contentKey, pseudonym string, r *float64, n uint64, powBits int) bool {
-	return leadingZeroBits(PowDigest(contentKey, pseudonym, r, n)) >= powBits
+func PowOK(contentKey, pseudonym string, r *float64, t int64, n uint64, powBits int) bool {
+	return leadingZeroBits(PowDigest(contentKey, pseudonym, r, t, n)) >= powBits
 }
 
 // SolvePow finds the smallest n satisfying the proof of work.
-func SolvePow(contentKey, pseudonym string, r *float64, powBits int) uint64 {
+func SolvePow(contentKey, pseudonym string, r *float64, t int64, powBits int) uint64 {
 	for n := uint64(0); ; n++ {
-		if PowOK(contentKey, pseudonym, r, n, powBits) {
+		if PowOK(contentKey, pseudonym, r, t, n, powBits) {
 			return n
 		}
 	}
 }
 
-// Pseudonym = HMAC(kUser, field("rating") || field(profileID) || field(contentKey)) (§9).
-func Pseudonym(kUser []byte, profileID, contentKey string) string {
-	m := hmac.New(sha256.New, kUser)
+// Pseudonym = HMAC(kRating, field("rating") || field(profileID) || field(contentKey)) (§9).
+func Pseudonym(kRating []byte, profileID, contentKey string) string {
+	m := hmac.New(sha256.New, kRating)
 	m.Write(fields("rating", profileID, contentKey))
 	return B64(m.Sum(nil))
 }

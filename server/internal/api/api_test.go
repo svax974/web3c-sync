@@ -38,6 +38,11 @@ func newEnv(t *testing.T, mut func(*config.Config)) *env {
 		WritesPerMin: 1000, CreatesPerDay: 100, VotesPerMin: 1000, RetentionDays: 365,
 		JoinTokenTTL: 10 * time.Minute,
 		Collections:  map[string]bool{"progress": true, "ratings": true},
+
+		ReqsPerMin: 100000, MaxStreamsDevice: 3, MaxStreamsGroup: 20, MaxStreamDuration: time.Hour,
+		MaxMembers: 50, MaxActiveTokens: 5, MaxRowsFactor: 2, MaxBlobs: 200, BlobMinCost: 512,
+		TombstoneDays: 180, ChangesMaxBytes: 4 << 20, MaxInFlight: 256, VotesPerDay: 100000,
+		MaxRatings: 1000, AdminFailsPerHour: 10,
 	}
 	if mut != nil {
 		mut(cfg)
@@ -343,8 +348,8 @@ func TestSSEStreamReplayAndLive(t *testing.T) {
 
 func TestCommunityRatings(t *testing.T) {
 	e := newEnv(t, nil)
-	put := func(key, pseud string, r *float64, n uint64) int {
-		b, _ := json.Marshal(map[string]any{"p": pseud, "r": r, "n": n})
+	put := func(key, pseud string, r *float64, ts int64, n uint64) int {
+		b, _ := json.Marshal(map[string]any{"p": pseud, "r": r, "t": ts, "n": n})
 		req, _ := http.NewRequest("PUT", e.ts.URL+"/v1/public/ratings/"+key, bytes.NewReader(b))
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -354,34 +359,28 @@ func TestCommunityRatings(t *testing.T) {
 		return res.StatusCode
 	}
 	key := "movie:tmdb:603"
+	now := time.Now().Unix()
 	p1, p2 := proto.B64(bytes.Repeat([]byte{1}, 32)), proto.B64(bytes.Repeat([]byte{2}, 32))
 	r8, r4, r11 := 8.0, 4.0, 11.0
 	bad := uint64(0)
-	for proto.PowOK(key, p1, &r8, bad, 8) {
+	for proto.PowOK(key, p1, &r8, now, bad, 8) {
 		bad++
 	}
-	if c := put(key, p1, &r8, bad); c != 403 {
+	if c := put(key, p1, &r8, now, bad); c != 403 {
 		t.Fatalf("missing PoW must be refused: %d", c)
 	}
-	if c := put(key, p1, &r8, proto.SolvePow(key, p1, &r8, 8)); c != 204 {
+	if c := put(key, p1, &r8, now, proto.SolvePow(key, p1, &r8, now, 8)); c != 204 {
 		t.Fatalf("vote: %d", c)
 	}
-	if c := put(key, p2, &r4, proto.SolvePow(key, p2, &r4, 8)); c != 204 {
+	if c := put(key, p2, &r4, now, proto.SolvePow(key, p2, &r4, now, 8)); c != 204 {
 		t.Fatalf("vote 2: %d", c)
 	}
-	if c := put(key, p2, &r11, proto.SolvePow(key, p2, &r11, 8)); c != 400 {
+	if c := put(key, p2, &r11, now+1, proto.SolvePow(key, p2, &r11, now+1, 8)); c != 400 {
 		t.Fatalf("out of range: %d", c)
 	}
-	// PoW is bound to the rating value: a proof for 8 must not validate 4.
-	n8 := proto.SolvePow(key, p1, &r8, 8)
-	for proto.PowOK(key, p1, &r4, n8, 8) { // make sure the replayed nonce is invalid for r4
-		n8++
-		for !proto.PowOK(key, p1, &r8, n8, 8) {
-			n8++
-		}
-	}
-	if c := put(key, p1, &r4, n8); c != 403 {
-		t.Fatalf("PoW reuse across ratings accepted: %d", c)
+	// Timestamp outside the window is refused (no re-dating / stockpiling).
+	if c := put(key, p1, &r4, now-3600, proto.SolvePow(key, p1, &r4, now-3600, 8)); c != 400 {
+		t.Fatalf("stale timestamp accepted: %d", c)
 	}
 	res, _ := http.Get(e.ts.URL + "/v1/public/ratings/" + key)
 	var agg struct {
@@ -394,12 +393,23 @@ func TestCommunityRatings(t *testing.T) {
 	if agg.Count != 2 || agg.Sum != 12 || agg.Avg != 6 {
 		t.Fatalf("aggregate: %+v", agg)
 	}
-	// Revoting replaces; null removes.
-	if c := put(key, p1, &r4, proto.SolvePow(key, p1, &r4, 8)); c != 204 {
+	// A newer vote replaces; replaying an OLDER captured vote never does.
+	if c := put(key, p1, &r4, now+5, proto.SolvePow(key, p1, &r4, now+5, 8)); c != 204 {
 		t.Fatalf("revote: %d", c)
 	}
-	if c := put(key, p2, nil, proto.SolvePow(key, p2, nil, 8)); c != 204 {
+	if c := put(key, p1, &r8, now, proto.SolvePow(key, p1, &r8, now, 8)); c != 409 {
+		t.Fatalf("replay of an older vote must be refused: %d", c)
+	}
+	if c := put(key, p1, &r4, now+5, proto.SolvePow(key, p1, &r4, now+5, 8)); c != 409 {
+		t.Fatalf("replay of the same vote must be refused: %d", c)
+	}
+	// Removal is a vote too (null), ordered by the same timestamp.
+	if c := put(key, p2, nil, now+6, proto.SolvePow(key, p2, nil, now+6, 8)); c != 204 {
 		t.Fatalf("remove: %d", c)
+	}
+	// Content keys are restricted to TMDB ids: no unbounded key space.
+	if c := put("anything:goes", p1, &r4, now, 0); c != 400 {
+		t.Fatalf("free-form content key accepted: %d", c)
 	}
 	b, _ := json.Marshal(map[string]any{"keys": []string{key, "movie:tmdb:1"}})
 	res, _ = http.Post(e.ts.URL+"/v1/public/ratings/query", "application/json", bytes.NewReader(b))
