@@ -272,6 +272,8 @@ Future<int> solvePowAsync(
 }) async {
   for (var n = 0;; n++) {
     if (powOk(contentKey, pseudonym, r, n, powBits)) return n;
-    if (n % yieldEvery == yieldEvery - 1) await Future<void>.delayed(Duration.zero);
+    if (n % yieldEvery == yieldEvery - 1) {
+      await Future<void>.delayed(Duration.zero);
+    }
   }
 }

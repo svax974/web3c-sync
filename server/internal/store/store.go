@@ -128,13 +128,13 @@ func (s *Store) tx(f func(*sql.Tx) error) error {
 // ---------- groups & members ----------
 
 // CreateGroup creates the group and its owner member atomically.
-func (s *Store) CreateGroup(id, ownerPub string) error {
+func (s *Store) CreateGroup(id, ownerPub, nameEnc string) error {
 	n := s.now().Unix()
 	return s.tx(func(t *sql.Tx) error {
 		if _, err := t.Exec(`INSERT INTO groups(id,created_at,last_activity) VALUES(?,?,?)`, id, n, n); err != nil {
 			return ErrExists
 		}
-		_, err := t.Exec(`INSERT INTO members(group_id,pub,owner,joined_at) VALUES(?,?,1,?)`, id, ownerPub, n)
+		_, err := t.Exec(`INSERT INTO members(group_id,pub,name_enc,owner,joined_at) VALUES(?,?,?,1,?)`, id, ownerPub, nameEnc, n)
 		return err
 	})
 }

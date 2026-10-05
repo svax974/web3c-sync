@@ -12,7 +12,8 @@ Uint8List parseFingerprint(String fp) {
   final h = fp.replaceAll(':', '').trim();
   if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(h)) {
     return Uint8List.fromList([
-      for (var i = 0; i < 64; i += 2) int.parse(h.substring(i, i + 2), radix: 16),
+      for (var i = 0; i < 64; i += 2)
+        int.parse(h.substring(i, i + 2), radix: 16),
     ]);
   }
   final b = unb64(h);

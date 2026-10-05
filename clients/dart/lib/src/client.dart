@@ -85,8 +85,7 @@ sealed class ChangeItem {
 }
 
 class DocChange extends ChangeItem {
-  DocChange(this.record)
-      : super(record.collection, record.docId, record.seq);
+  DocChange(this.record) : super(record.collection, record.docId, record.seq);
   final DocRecord record;
 }
 
@@ -167,7 +166,9 @@ class Web3CSyncClient {
 
   List<int>? get groupKey => _groupKey;
   set groupKey(List<int>? k) {
-    if (k != null && k.length != 32) throw ArgumentError('K_g must be 32 bytes');
+    if (k != null && k.length != 32) {
+      throw ArgumentError('K_g must be 32 bytes');
+    }
     _groupKey = k == null ? null : Uint8List.fromList(k);
     _keys = k == null ? null : c.deriveKeys(k);
   }
@@ -244,13 +245,20 @@ class Web3CSyncClient {
   // ---------- groups ----------
 
   /// Creates the group. Generates a groupId / K_g when the client has none.
-  Future<String> createGroup() async {
+  ///
+  /// [deviceName], when given, is stored encrypted with K_name so the owner is
+  /// listed by name in [members].
+  Future<String> createGroup({String? deviceName}) async {
     groupId ??= GroupLink.generateGroupId();
     groupKey ??= GroupLink.generateGroupKey();
+    final nameEnc = deviceName == null
+        ? null
+        : await _sealName(deviceName, deviceKey.publicKeyB64);
     await _send(
       'POST',
       '/v1/g',
-      body: utf8.encode(jsonEncode({'groupId': groupId})),
+      body: utf8.encode(jsonEncode(
+          {'groupId': groupId, if (nameEnc != null) 'nameEnc': nameEnc})),
       headers: {
         'Content-Type': 'application/json',
         if (adminToken != null) 'Authorization': 'Bearer $adminToken',
@@ -321,7 +329,8 @@ class Web3CSyncClient {
           nameEnc: (m['nameEnc'] as String?) ?? '',
           name: _keys == null
               ? null
-              : await _openName((m['nameEnc'] as String?) ?? '', m['device'] as String),
+              : await _openName(
+                  (m['nameEnc'] as String?) ?? '', m['device'] as String),
           owner: m['owner'] as bool,
           joinedAt: (m['joinedAt'] as num).toInt(),
         ),
@@ -459,7 +468,8 @@ class Web3CSyncClient {
     MergeFn merge = lastWriteWins,
     int maxAttempts = 5,
   }) async {
-    final local = Versioned(payload, updatedAt ?? _clock().millisecondsSinceEpoch);
+    final local =
+        Versioned(payload, updatedAt ?? _clock().millisecondsSinceEpoch);
     ConflictException? last;
     for (var i = 0; i < maxAttempts; i++) {
       var seq = 0;
@@ -562,9 +572,9 @@ class Web3CSyncClient {
             '/v1/g/$_gid/stream?since=$last',
             headers: {'Accept': 'text/event-stream'},
           );
-          final abortable = http.AbortableRequest('GET', req.url,
-              abortTrigger: abort.future)
-            ..headers.addAll(req.headers);
+          final abortable =
+              http.AbortableRequest('GET', req.url, abortTrigger: abort.future)
+                ..headers.addAll(req.headers);
           final res = await _http.send(abortable);
           if (res.statusCode != 200) {
             checkResponse(await http.Response.fromStream(res));
@@ -608,7 +618,8 @@ class Web3CSyncClient {
           if (cancelled) return;
         }
         if (cancelled) return;
-        final jitter = Duration(milliseconds: rng.nextInt(delay.inMilliseconds ~/ 4 + 1));
+        final jitter =
+            Duration(milliseconds: rng.nextInt(delay.inMilliseconds ~/ 4 + 1));
         await Future<void>.delayed(delay + jitter);
         delay = delay * 2 > sseBackoffMax ? sseBackoffMax : delay * 2;
       }
@@ -640,10 +651,10 @@ class Web3CSyncClient {
       );
 
   /// Reads a blob, or the inclusive byte range [rangeStart]..[rangeEnd].
-  Future<Uint8List> getBlob(String blobId, {int? rangeStart, int? rangeEnd}) async {
-    final range = rangeStart == null
-        ? null
-        : 'bytes=$rangeStart-${rangeEnd ?? ''}';
+  Future<Uint8List> getBlob(String blobId,
+      {int? rangeStart, int? rangeEnd}) async {
+    final range =
+        rangeStart == null ? null : 'bytes=$rangeStart-${rangeEnd ?? ''}';
     final res = await _send(
       'GET',
       '/v1/g/$_gid/b/$blobId',

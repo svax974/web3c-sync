@@ -9,12 +9,12 @@ class SyncException implements Exception {
   final String code;
   final String? message;
   @override
-  String toString() => '$runtimeType($status $code${message == null ? '' : ': $message'})';
+  String toString() =>
+      '$runtimeType($status $code${message == null ? '' : ': $message'})';
 }
 
 class BadRequestException extends SyncException {
-  const BadRequestException([String code = 'bad_request'])
-      : super(400, code);
+  const BadRequestException([String code = 'bad_request']) : super(400, code);
 }
 
 class UnauthorizedException extends SyncException {
@@ -95,7 +95,9 @@ void checkResponse(http.Response r) {
     case 413:
       throw QuotaException(413, code, b['limit'] as String?);
     case 429:
-      if (code == 'quota') throw QuotaException(429, code, b['limit'] as String?);
+      if (code == 'quota') {
+        throw QuotaException(429, code, b['limit'] as String?);
+      }
       final s = int.tryParse(r.headers['retry-after'] ?? '');
       throw RateLimitedException(s == null ? null : Duration(seconds: s));
     default:

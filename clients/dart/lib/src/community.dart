@@ -55,7 +55,8 @@ class CommunityClient {
 
   Future<RatingAggregate> get(String contentKey) async {
     _checkKey(contentKey);
-    final res = await _http.get(Uri.parse('$baseUrl/v1/public/ratings/$contentKey'));
+    final res =
+        await _http.get(Uri.parse('$baseUrl/v1/public/ratings/$contentKey'));
     checkResponse(res);
     return RatingAggregate.fromJson(
         jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>);
@@ -66,7 +67,8 @@ class CommunityClient {
     keys.forEach(_checkKey);
     final out = <String, RatingAggregate>{};
     for (var i = 0; i < keys.length; i += 100) {
-      final chunk = keys.sublist(i, i + 100 > keys.length ? keys.length : i + 100);
+      final chunk =
+          keys.sublist(i, i + 100 > keys.length ? keys.length : i + 100);
       final res = await _http.post(
         Uri.parse('$baseUrl/v1/public/ratings/query'),
         headers: {'Content-Type': 'application/json'},

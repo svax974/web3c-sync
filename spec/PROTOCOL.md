@@ -99,13 +99,16 @@ web3c-sync/v1\n
 
 Le serveur refuse (401) si : signature invalide, |now − timestamp| > 120 s, nonce
 déjà vu dans la fenêtre, ou (hors `join` et création) `devicePub` non membre du
-groupe de l'URL. Le corps vide hache `e3b0c442…b855`.
+groupe de l'URL. Le corps vide hache `e3b0c442…b855`. Le chemin signé est celui **reçu par le serveur** :
+un reverse proxy ne doit ni retirer ni ajouter de préfixe (les trois domaines
+`sync-*.web3c.cc` sont servis à la racine).
 
 ## 6. Groupes et appareils
 
 ### 6.1 Création
 
-`POST /v1/g` — corps JSON `{"groupId":"…"}`. Signée par la future clé du
+`POST /v1/g` — corps JSON `{"groupId":"…","nameEnc":"…"}` (`nameEnc` optionnel, même
+construction qu'au §6.2 : nom de l'appareil propriétaire). Signée par la future clé du
 propriétaire. 201. Si l'instance l'exige (serveur personnel), l'en-tête
 `Authorization: Bearer <adminToken>` est obligatoire.
 Le propriétaire est membre d'office.
@@ -150,10 +153,11 @@ Chaque écriture dans un groupe incrémente un compteur `seq` du groupe.
   `{"seq":n}` ; le client récupère, **fusionne** (le `u` interne le plus récent
   gagne), puis réécrit.
 - `GET …` → corps = enveloppe ; en-têtes `X-Seq`, `X-Updated-At`. Un document
-  supprimé répond **410** avec `X-Seq` et `X-Deleted: 1`.
+  supprimé répond **410** avec `X-Seq` et `X-Deleted: 1` ; recréer un document
+  supprimé exige `If-Match` = ce `X-Seq` (celui du tombstone).
 - `DELETE …` (`If-Match` obligatoire) → tombstone : le contenu est effacé, `deleted`
   est vrai, `seq` augmente. Les tombstones sont conservés pour la vie du groupe.
-- `GET /v1/g/{gid}/changes?since=N&limit=500` → `{"items":[{"collection":"…",
+- `GET /v1/g/{gid}/changes?since=N&limit=500` (`limit` ≤ 500 ; au-delà ou absent : 500) → `{"items":[{"collection":"…",
   "docId":"…","seq":n,"deleted":bool,"updatedAt":s,"env":"<b64url>"}],
   "next":N',"more":bool}`. `env` absent pour un tombstone. Ordre croissant de
   `seq`. Un client neuf utilise `since=0`.
@@ -234,4 +238,9 @@ d'échec d'authentification.
 Ed25519, nonce AES-GCM forcé en test) : dérivation HKDF, `docId`, `padme`,
 enveloppe complète, chaîne canonique + signature, preuve de travail, pseudonyme.
 Les clients Dart et Swift **doivent** reproduire chaque sortie octet pour octet
-et déchiffrer les enveloppes du fichier.
+et déchiffrer les enveloppes du fichier. **Exception : les signatures Ed25519.**
+RFC 8032 est déterministe, mais CryptoKit signe de façon randomisée : un client ne
+peut donc pas toujours reproduire la signature du vecteur. Il doit alors (1) obtenir
+la même clé publique depuis la graine, (2) produire la même chaîne canonique,
+(3) **vérifier avec succès** la signature du vecteur, (4) produire une signature
+que sa propre vérification accepte. Le serveur ne fait que vérifier.

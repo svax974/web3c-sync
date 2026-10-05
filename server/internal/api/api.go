@@ -236,12 +236,13 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request, a *authed) 
 	}
 	var req struct {
 		GroupID string `json:"groupId"`
+		NameEnc string `json:"nameEnc"`
 	}
-	if json.Unmarshal(a.body, &req) != nil || !validGroupID(req.GroupID) {
+	if json.Unmarshal(a.body, &req) != nil || !validGroupID(req.GroupID) || len(req.NameEnc) > 512 {
 		errBadRequest.write(w)
 		return
 	}
-	switch err := s.st.CreateGroup(req.GroupID, a.pub); {
+	switch err := s.st.CreateGroup(req.GroupID, a.pub, req.NameEnc); {
 	case errors.Is(err, store.ErrExists):
 		errConflict.write(w)
 	case err != nil:
