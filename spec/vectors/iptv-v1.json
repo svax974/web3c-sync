@@ -1,0 +1,57 @@
+{
+  "doneThreshold": 0.9,
+  "normalizeServer": [
+    {
+      "in": "http://Example.COM:80/",
+      "out": "http://example.com"
+    },
+    {
+      "in": "https://Example.com:443",
+      "out": "https://example.com"
+    },
+    {
+      "in": "example.com:8080/",
+      "out": "http://example.com:8080"
+    },
+    {
+      "in": "HTTP://host.tld:8000///",
+      "out": "http://host.tld:8000"
+    },
+    {
+      "in": "http://1.2.3.4/xc",
+      "out": "http://1.2.3.4/xc"
+    },
+    {
+      "in": "  http://srv.tld/panel/  ",
+      "out": "http://srv.tld/panel"
+    },
+    {
+      "in": "https://srv.tld:8443/a/b/",
+      "out": "https://srv.tld:8443/a/b"
+    },
+    {
+      "in": "srv.tld",
+      "out": "http://srv.tld"
+    }
+  ],
+  "sourceKey": [
+    {
+      "kind": "xtream",
+      "server": "http://Example.COM:80/",
+      "sourceKey": "AVGmyVGxilgyqotQ",
+      "user": "Bob"
+    },
+    {
+      "kind": "xtream",
+      "server": "https://srv.tld:8443/a/",
+      "sourceKey": "0KEtTU8qPz5rzHDq",
+      "user": "alice"
+    },
+    {
+      "kind": "m3u",
+      "server": "http://x.tld/get.php?username=a\u0026password=b\u0026type=m3u",
+      "sourceKey": "p7-tsv-TVwyMY2Ig",
+      "user": ""
+    }
+  ]
+}

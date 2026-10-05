@@ -20,6 +20,12 @@ func seq(start, n int) []byte {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "iptv" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(iptvVectors())
+		return
+	}
 	kg := seq(0, 32)
 	keys := proto.DeriveKeys(kg)
 	instance, group, coll := "iptv", "AAAAAAAAAAAAAAAAAAAAAA", "progress"

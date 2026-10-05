@@ -63,10 +63,17 @@ publie un `DELETE` ; à réception d'un tombstone, l'élément local est supprim
 (résurrection volontaire).
 
 ### Clés dérivées
-- `sourceKey = base64url(SHA-256("xtream|" + serveur normalisé + "|" + utilisateur)[0..12])`
-  pour Xtream ; `base64url(SHA-256("m3u|" + url)[0..12])` pour M3U. Le serveur est
-  normalisé : minuscules, sans `/` final, sans port par défaut. Un identifiant
-  local de source adopte `sourceKey` quand elle est créée par la synchro.
+- `sourceKey = base64url(SHA-256(kind + "|" + serveur + "|" + utilisateur)[0..12])`
+  (12 octets → 16 caractères). Xtream : `kind = "xtream"`, serveur = serveur
+  **normalisé**, utilisateur tel que saisi (casse conservée). M3U : `kind = "m3u"`,
+  serveur = l'URL complète saisie (espaces extérieurs retirés), utilisateur vide.
+- **Normalisation du serveur** : sans schéma, `http://` est supposé ; schéma et
+  hôte en minuscules ; port par défaut retiré (`:80` en http, `:443` en https) ;
+  ni requête ni fragment ; barres obliques finales du chemin retirées.
+- Les cas de référence sont dans `spec/vectors/iptv-v1.json` (`normalizeServer`,
+  `sourceKey`, `doneThreshold`) ; chaque moteur (Dart, Swift) les rejoue en test.
+- Un identifiant local de source adopte `sourceKey` quand elle est créée par la
+  synchro.
 - La clé de contenu `{type}_{id}` n'est pas qualifiée par la source (état
   historique) ; `src` en charge utile lève l'ambiguïté quand elle est connue.
 
