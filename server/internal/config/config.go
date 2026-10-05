@@ -53,7 +53,10 @@ type Config struct {
 	OpenRegistration  bool
 }
 
-var defaultMaxDocs = map[string]int{"iptv": 20000, "banking": 5000, "aiteam": 5000}
+var defaultMaxDocs = map[string]int{"iptv": 20000, "banking": 5000, "aiteam": 50000}
+
+// defaultMaxBytesMiB: conversation history (one document per message) needs room.
+var defaultMaxBytesMiB = map[string]int{"iptv": 64, "banking": 64, "aiteam": 256}
 
 var defaultCollections = map[string]string{
 	"iptv": "profiles,progress,ratings,favorites,lists,order,sources,prefs",
@@ -134,7 +137,7 @@ func Load() (*Config, error) {
 			return nil, err
 		}
 	}
-	mb, err := envInt("SYNC_MAX_BYTES_MIB", 64)
+	mb, err := envInt("SYNC_MAX_BYTES_MIB", defaultMaxBytesMiB[c.Instance])
 	if err != nil {
 		return nil, err
 	}

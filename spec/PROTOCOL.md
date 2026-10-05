@@ -201,7 +201,7 @@ Chaque écriture dans un groupe incrémente un compteur `seq` du groupe.
   `quota`, `limit`: `streams`).
 
 Limites par instance (valeurs par défaut du serveur fourni) : document ≤ 256 KiB,
-≤ 5 000 documents (20 000 pour `iptv`) et ≤ 64 MiB par groupe, au plus deux fois
+≤ 5 000 documents (20 000 pour `iptv`, 50 000 pour `aiteam`) et ≤ 64 MiB par groupe (256 MiB pour `aiteam`), au plus deux fois
 le plafond de documents en lignes (documents + tombstones), ≤ 200 blobs (chacun
 compté pour au moins 4 Kio), ≤ 120 écritures/minute/appareil, ≤ 120 lectures/minute/appareil.
 Document ou blob plus gros que la limite : **413** `{"error":"too_large"}`.
