@@ -90,7 +90,11 @@ class DocChange extends ChangeItem {
 }
 
 class Tombstone extends ChangeItem {
-  const Tombstone(super.collection, super.docId, super.seq);
+  const Tombstone(super.collection, super.docId, super.seq,
+      [this.updatedAt = 0]);
+
+  /// Server time of the deletion, epoch seconds (0 when unknown).
+  final int updatedAt;
 }
 
 /// An item that could not be decrypted or failed the docId integrity check
@@ -526,7 +530,8 @@ class Web3CSyncClient {
       final id = it['docId'] as String;
       final seq = (it['seq'] as num).toInt();
       if (it['deleted'] == true) {
-        items.add(Tombstone(coll, id, seq));
+        items.add(
+            Tombstone(coll, id, seq, (it['updatedAt'] as num?)?.toInt() ?? 0));
         continue;
       }
       try {

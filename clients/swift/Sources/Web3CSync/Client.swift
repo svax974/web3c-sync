@@ -49,6 +49,8 @@ public struct Tombstone: Sendable, Equatable {
     public let collection: String
     public let docId: String
     public let seq: Int64
+    /// Instant serveur de la suppression, secondes Unix (0 si inconnu).
+    public let updatedAt: Int64
 }
 
 /// Élément de `changes` rejeté (déchiffrement ou vérification d'identifiant impossible).
@@ -350,7 +352,7 @@ public actor Web3CSyncClient {
         var page = ChangesPage(items: [], tombstones: [], rejected: [], next: r.next, more: r.more)
         for it in r.items {
             if it.deleted {
-                page.tombstones.append(Tombstone(collection: it.collection, docId: it.docId, seq: it.seq))
+                page.tombstones.append(Tombstone(collection: it.collection, docId: it.docId, seq: it.seq, updatedAt: it.updatedAt ?? 0))
                 continue
             }
             if let s = it.env, let env = B64.decode(s),

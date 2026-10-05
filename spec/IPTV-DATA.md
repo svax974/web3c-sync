@@ -49,7 +49,7 @@ modification locale** (jamais à l'instant de la synchro).
 | `favorites` | `{profileId}/{type}_{id}` | `{name?, icon?, src?: sourceKey}` | `favorites_{pid}` / `favorites.json` |
 | `lists` | `{profileId}/{listId}` | `{name, icon, items:[{type,id,name,icon}] }` | `custom_lists_{pid}` / `lists.json` |
 | `order` | `{profileId}` | `{map:{"{src}_{streamId}": n}}` | `channel_order_{pid}` / `channel_order.json` |
-| `sources` | `sourceKey` | `{name, type, server?, user?, pass?, m3u?, epg?, active}` | box `playlists` / `playlists.json` |
+| `sources` | `sourceKey` | `{name, type (xtream\|m3u), server?, user?, pass?, m3u?, epg?, active}` (`xmltvUrl` et infos de compte restent locaux) | box `playlists` / `playlists.json` |
 | `prefs` | `app` | voir §4 | `AppSettings` / `settings.json` |
 
 `type` ∈ `channel|movie|series`. `id` est l'identifiant du contenu chez la source
@@ -87,6 +87,34 @@ publie un `DELETE` ; à réception d'un tombstone, l'élément local est supprim
 | `profiles` | LWW ; la suppression d'un profil publie ses tombstones (`profiles`, puis chaque doc `{profileId}/…`) |
 | `sources` | LWW ; la suppression locale publie un tombstone |
 
+**Précisions normatives** (décidées à l'implémentation du premier moteur, Flutter ;
+tout autre moteur les respecte) :
+- **Départage d'égalité de `u`** : la charge utile sérialisée **canonique** la plus
+  grande l'emporte (comparaison d'octets UTF-8 ; clés triées à tous les niveaux,
+  sans espaces).
+- **Le serveur fait foi sans modification locale en attente** : une copie locale qui
+  n'a aucun changement non envoyé adopte la version du serveur sans comparer les
+  `u` (évite les dérives d'horloge). La comparaison par `u` ne s'applique que s'il
+  existe un changement local non envoyé, ou si l'élément existait localement avant
+  d'avoir jamais été synchronisé (il compte alors pour `u = 0` quand il n'a pas
+  d'horodatage fiable : profil, liste, source, ordre, réglages).
+- **Tombstone** : l'instant de la suppression est le `updatedAt` du serveur ; un
+  changement local en attente plus récent l'emporte (résurrection). Instant
+  inconnu : la suppression gagne.
+- `progress.series` est l'identifiant de série **en texte**. Identifiants de
+  contenu : sérialisés en texte dans les clés ; un moteur ignore ceux qu'il ne sait
+  pas représenter.
+- **Source dont l'adresse est modifiée** : sa `sourceKey` change ; l'ancienne est
+  supprimée (tombstone), la nouvelle écrite, et les profils sont renvoyés.
+- **Sources non résolubles** par ce profil (par ex. `syncSources` désactivé) : leurs
+  clés restent dans la sélection du profil et sont réécrites telles quelles.
+- Premier appairage d'un appareil neuf : un profil local **vide et jamais
+  synchronisé** est supprimé silencieusement (sans tombstone) si des profils
+  distants existent.
+- Réglages utilisateur du moteur : `syncSources`, `syncPrefs`,
+  `communityRatingsEnabled` (défaut vrai ; faux = rien n'est envoyé **ni lu** pour
+  les notes communautaires).
+
 Écriture : toujours `If-Match` (concurrence optimiste, PROTOCOL §7) ; sur 409,
 relire, fusionner par la règle ci-dessus, réécrire.
 
@@ -102,8 +130,11 @@ colonnes de grille, thème, gain audio, taille/couleur des sous-titres, lecteur 
 défaut, clé TMDB, jetons Twitch, identifiants du serveur de synchro, empreinte
 TLS, pointeur de groupe.
 
-Un champ absent d'une charge utile `prefs` n'écrase jamais la valeur locale
-(compatibilité ascendante).
+Clés de la charge utile `prefs` : `audio_lang`, `sub_lang`, `auto_play`,
+`skip_intro`, `start_page` (`home|liveTV|vod|series`), `refresh_enabled`,
+`refresh_days`, `svod` (liste triée), `parental_on`, `parental_pin`.
+Un champ absent n'écrase jamais la valeur locale (compatibilité ascendante) ; un
+`parental_pin` explicitement `null` efface le PIN.
 
 ## 5. Quotas pour l'instance `iptv`
 
