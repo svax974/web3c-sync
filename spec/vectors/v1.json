@@ -1,4 +1,12 @@
 {
+  "deviceName": {
+    "devicePub": "d3bocLkzVPKgskwj8qNsxOgOIjIYwbl5Jv3QGDlqK5s",
+    "groupId": "AAAAAAAAAAAAAAAAAAAAAA",
+    "instance": "iptv",
+    "name": "Apple TV salon",
+    "nameEnc": "AcDBwsPExcbHyMnKy8wd896nMIKAb7RCQ9cFE7eS4VlJXTSjL_5UYtaSl3sn",
+    "nonce": "wMHCw8TFxsfIycrL"
+  },
   "docId": {
     "collection": "progress",
     "docId": "PozOeDxekC4ArpWy012UEwcJvU6GPtUJy-69g7SZTC4",
@@ -107,6 +115,16 @@
     "instance": "iptv",
     "nonce": "oKGio6Slpqeoqaqr",
     "plaintext": "{\"v\":1,\"u\":1760000000000,\"d\":{\"pos\":120,\"dur\":5400}}"
+  },
+  "sealApp": {
+    "collection": "progress",
+    "docId": "2pEbYn3Dwj79KcKnXuRnq-sO4UhABY9aA7KOaZ4z5LI",
+    "envelope": "AbCxsrO0tba3uLm6u0aLilFWuZvDZUuT57THldBRa4TrFl-Dem7J7I_Qpb9bVWQOAjGiH3ZWHIooNc32E1j6NuJtTHFBEDahDzw4n54xaC6F53XCUgFsyFvvYSJEjiRsa5poj7Ll8larefcRC2Kd-XqCxWzq",
+    "groupId": "AAAAAAAAAAAAAAAAAAAAAA",
+    "instance": "iptv",
+    "logicalId": "p1/movie_1234",
+    "nonce": "sLGys7S1tre4ubq7",
+    "plaintext": "{\"v\":1,\"u\":1760000000000,\"k\":\"p1/movie_1234\",\"d\":{\"pos\":120,\"dur\":5400,\"done\":false}}"
   },
   "version": "web3c-sync/v1"
 }

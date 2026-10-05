@@ -1,0 +1,16 @@
+name: web3c_sync
+description: Reference Dart client for the web3c-sync v1 protocol (end-to-end encrypted sync).
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  cryptography: ^2.7.0
+  http: ^1.5.0
+  meta: ^1.11.0
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^4.0.0

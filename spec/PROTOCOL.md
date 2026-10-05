@@ -82,7 +82,7 @@ Chaque requête (sauf `GET /v1/health` et les routes publiques §9) porte :
 |---|---|
 | `X-Device` | `devicePub` en base64url |
 | `X-Timestamp` | secondes Unix (entier décimal) |
-| `X-Nonce` | 16 octets aléatoires, base64url |
+| `X-Nonce` | **exactement** 16 octets aléatoires, base64url |
 | `X-Signature` | Ed25519 en base64url, sur la chaîne canonique ci-dessous |
 
 Chaîne canonique (octets UTF-8, `\n` = 0x0A) :
@@ -116,10 +116,13 @@ Le propriétaire est membre d'office.
   "expiresAt":<epoch s>}`. Jeton à usage unique, valable **10 minutes** (le
   serveur ne stocke que `SHA-256(token)`).
 - Nouvel appareil : `POST /v1/g/{gid}/join`, corps
-  `{"token":"…","nameEnc":"<b64url enveloppe §3 de collection "_name">"}`, signée
+  `{"token":"…","nameEnc":"<b64url enveloppe>"}`, où `nameEnc` =
+  `Seal(K_name, AAD(instance, groupId, "_name", devicePub), nom UTF-8)` (`devicePub`
+  en base64url comme docId de l'AAD), signée
   par la nouvelle clé (preuve de possession). 200 : l'appareil devient membre.
   Jeton déjà utilisé, expiré ou inconnu : 403 identique (pas d'oracle).
-- QR / code d'appairage : `web3c-link:v1?s=<urlServeur>&i=<instance>&g=<groupId>&t=<token>&k=<K_g>[&f=<empreinteTLS>]`.
+- QR / code d'appairage : `web3c-link:v1?s=<urlServeur>&i=<instance>&g=<groupId>&t=<token>&k=<K_g>[&f=<empreinteTLS>]`, où `f` est l'empreinte SHA-256 du certificat serveur (DER, feuille)
+  encodée en base64url sans remplissage ; les clients tolèrent aussi l'hexadécimal.
 
 ### 6.3 Membres
 
@@ -131,7 +134,8 @@ Le propriétaire est membre d'office.
 ### 6.4 Informations et effacement
 
 - `GET /v1/g/{gid}/info` → `{"instance":"…","seq":n,"docs":n,"bytes":n,
-  "quota":{…},"purgeAt":<epoch s>}` (date de purge pour inactivité).
+  "members":n,"quota":{"maxDocs":n,"maxBytes":n,"maxDocSize":n},
+  "purgeAt":<epoch s>}` (date de purge pour inactivité).
 - `DELETE /v1/g/{gid}` : propriétaire ; supprime tout (documents, blobs,
   membres, jetons). 204.
 
@@ -160,7 +164,9 @@ Chaque écriture dans un groupe incrémente un compteur `seq` du groupe.
 
 Limites par instance (valeurs par défaut du serveur fourni) : document ≤ 256 KiB,
 ≤ 5 000 documents (20 000 pour `iptv`) et ≤ 64 MiB par groupe, ≤ 120 écritures/minute/appareil.
-Dépassement : 413 ou 429 avec un corps `{"error":"quota","limit":"…"}`.
+Document ou blob plus gros que la limite : **413** `{"error":"too_large"}`.
+Quota de groupe (nombre de documents, octets) : **429** `{"error":"quota","limit":"group"}`.
+Limitation de débit : **429** `{"error":"rate_limited"}`.
 
 ## 8. Rotation de la clé de groupe (premier lot : manuelle)
 

@@ -30,6 +30,13 @@ func main() {
 	pt := []byte(`{"v":1,"u":1760000000000,"d":{"pos":120,"dur":5400}}`)
 	env, _ := proto.Seal(keys.Enc, aad, pt, nonce)
 
+	// Application-level document (with the logical id "k") and a device name.
+	appPT := []byte(`{"v":1,"u":1760000000000,"k":"` + "p1/movie_1234" + `","d":{"pos":120,"dur":5400,"done":false}}`)
+	appDoc := proto.DocID(keys.ID, "progress", "p1/movie_1234")
+	appEnv, _ := proto.Seal(keys.Enc, proto.AAD(instance, group, "progress", appDoc), appPT, seq(0xB0, 12))
+	devPub := proto.B64(ed25519.NewKeyFromSeed(seq(0x10, 32)).Public().(ed25519.PublicKey))
+	nameEnv, _ := proto.Seal(keys.Name, proto.AAD(instance, group, "_name", devPub), []byte("Apple TV salon"), seq(0xC0, 12))
+
 	seed := seq(0x10, 32)
 	priv := ed25519.NewKeyFromSeed(seed)
 	pub := priv.Public().(ed25519.PublicKey)
@@ -69,6 +76,15 @@ func main() {
 		},
 		"docId": map[string]any{
 			"collection": coll, "logicalId": logical, "docId": docID,
+		},
+		"sealApp": map[string]any{
+			"instance": instance, "groupId": group, "collection": "progress",
+			"logicalId": "p1/movie_1234", "docId": appDoc,
+			"plaintext": string(appPT), "nonce": proto.B64(seq(0xB0, 12)), "envelope": proto.B64(appEnv),
+		},
+		"deviceName": map[string]any{
+			"instance": instance, "groupId": group, "devicePub": devPub,
+			"name": "Apple TV salon", "nonce": proto.B64(seq(0xC0, 12)), "nameEnc": proto.B64(nameEnv),
 		},
 		"padme": map[string]any{"in": padIn, "out": padLens},
 		"seal": map[string]any{

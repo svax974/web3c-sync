@@ -185,7 +185,7 @@ func (s *Server) verify(r *http.Request, body []byte) (string, bool) {
 	if d := now.Sub(time.Unix(sec, 0)); d > clockSkew || d < -clockSkew {
 		return "", false
 	}
-	if n, err := proto.UnB64(nonce); err != nil || len(n) < 8 || len(n) > 64 {
+	if n, err := proto.UnB64(nonce); err != nil || len(n) != 16 {
 		return "", false
 	}
 	canon := proto.Canonical(r.Method, r.RequestURI, ts, nonce, proto.BodyHash(body), s.cfg.Instance)

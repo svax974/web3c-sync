@@ -18,6 +18,7 @@ Plan et décisions : `AICompanion/docs-project/plans/2026-10-05-sync-web3c-backe
 ```sh
 cd server
 go test ./...            # sur macOS récent : go test -ldflags=-linkmode=external ./...
+# Pour lancer un binaire compilé sur ce Mac : codesign -s - -f ./syncd (sinon il est tué au lancement)
 go run ./cmd/genvectors > ../spec/vectors/v1.json   # régénère les vecteurs (déterministe)
 
 SYNC_INSTANCE=iptv SYNC_DB=/tmp/s.db SYNC_BLOB_DIR=/tmp/blobs go run ./cmd/syncd
