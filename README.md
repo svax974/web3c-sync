@@ -8,6 +8,7 @@ SoSimpleBank et AICompanion.
 - `spec/vectors/v1.json` — vecteurs de test que tout client doit reproduire.
 - `server/` — serveur Go (SQLite, une instance par usage : `iptv`, `banking`, `aiteam`).
 - `clients/dart/`, `clients/swift/` — clients de référence.
+- `clients/dart_engine/` — briques génériques des moteurs de synchro Dart (transport, fusion LWW, comptabilité du curseur / anti-rollback / boîte d'envoi, contrôleur de groupe, erreurs assainies) partagées par `vxiptv_sync` et `budget_sync_web3c`.
 - `deploy/` — fichiers de déploiement (le déploiement des domaines publics se fait
   par les rôles Ansible d'InfraManager).
 

@@ -1,0 +1,28 @@
+name: web3c_sync_engine
+description: >-
+  Generic, Dart-only building blocks shared by the web3c-sync sync engines
+  (IPTV, budget, ...): vault transport (+ in-memory double), last-write-wins
+  merge, per-document bookkeeping (cursor, anti-rollback counters, outbox),
+  group controller, secret store and sanitised errors.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  crypto: ^3.0.0
+  # Same git description as every consumer (vxiptv_sync, budget_sync_web3c,
+  # AICompanion): pub refuses two different sources for one package name.
+  web3c_sync:
+    git:
+      url: https://github.com/svax974/web3c-sync.git
+      ref: v0.1.0
+      path: clients/dart
+  http: ^1.5.0
+  # Only imported by lib/hive.dart (pure Dart; the core never loads it).
+  hive_ce: ^2.19.3
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^4.0.0
