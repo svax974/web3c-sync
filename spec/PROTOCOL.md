@@ -59,8 +59,13 @@ longueur < 1 + 12 + 16 + 1, ou dont l'authentification échoue. Les erreurs ne
 révèlent pas la cause.
 
 Le contenu en clair (`plaintext`) d'un document de synchro est un JSON :
-`{"v":1,"u":<updatedAt epoch ms>,"d":<charge utile>}` ; une suppression logique
-est portée par le serveur (§6.3), pas par le contenu.
+`{"v":1,"u":<updatedAt epoch ms>,"k":"<identifiant logique>","d":<charge utile>}`.
+`k` est l'identifiant logique dont `docId` est le HMAC (§4) : `docId` n'étant pas
+réversible, c'est `k` qui permet à un autre appareil de savoir à quoi correspond
+un document reçu ; le client **doit** vérifier que `HMAC(K_id, collection, k)`
+égale le `docId` reçu. Une suppression est portée par le serveur (§7), pas par le
+contenu ; un tombstone ne porte pas de `k` : le client retrouve l'élément local
+par son `docId` (index local `docId → k`) et ignore un tombstone inconnu.
 
 ## 4. Identifiant de document pseudonymisé
 
