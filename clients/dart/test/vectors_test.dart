@@ -17,6 +17,7 @@ void main() {
     expect(b64(k.enc), h['enc']);
     expect(b64(k.id), h['id']);
     expect(b64(k.name), h['name']);
+    expect(b64(k.rating), h['rating']);
   });
 
   test('docId', () {
@@ -60,6 +61,23 @@ void main() {
             utf8.decode(await open(k.enc, a, unb64(app['envelope'] as String))))
         as Map<String, dynamic>;
     expect(opened['k'], app['logicalId']);
+    expect(opened['c'], 3);
+    expect(opened.containsKey('del'), isFalse);
+
+    final del = v['sealDel'] as Map<String, dynamic>;
+    expect(del['docId'], app['docId']);
+    final da = aad(app['instance'] as String, app['groupId'] as String,
+        del['collection'] as String, del['docId'] as String);
+    expect(
+        b64(await seal(k.enc, da, utf8.encode(del['plaintext'] as String),
+            nonce: unb64(del['nonce'] as String))),
+        del['envelope']);
+    final dopen = jsonDecode(utf8
+            .decode(await open(k.enc, da, unb64(del['envelope'] as String))))
+        as Map<String, dynamic>;
+    expect(dopen['del'], isTrue);
+    expect(dopen['c'], 4);
+    expect(dopen.containsKey('d'), isFalse);
 
     final n = v['deviceName'] as Map<String, dynamic>;
     final na = aad(n['instance'] as String, n['groupId'] as String, '_name',
@@ -91,21 +109,28 @@ void main() {
 
   test('rating: pseudonym, text, digest', () {
     final r = v['rating'] as Map<String, dynamic>;
-    final kUser = r['kUser'] == 'id'
-        ? deriveKeys(unb64(v['hkdf']['kg'] as String)).id
-        : unb64(r['kUser'] as String);
+    expect(r['kRating'], 'rating');
+    final kRating = deriveKeys(unb64(v['hkdf']['kg'] as String)).rating;
+    final t = r['t'] as int;
     final p =
-        pseudonym(kUser, r['profileId'] as String, r['contentKey'] as String);
+        pseudonym(kRating, r['profileId'] as String, r['contentKey'] as String);
     expect(p, r['pseudonym']);
     final rating = r['r'] as num?;
     expect(ratingText(rating), r['ratingText']);
-    final d = powDigest(r['contentKey'] as String, p, rating, r['n'] as int);
+    final d =
+        powDigest(r['contentKey'] as String, p, rating, r['n'] as int, t: t);
     expect(b64(d), r['digest']);
     expect(leadingZeroBits(d), greaterThanOrEqualTo(r['powBits'] as int));
     expect(
         powOk(r['contentKey'] as String, p, rating, r['n'] as int,
-            r['powBits'] as int),
+            r['powBits'] as int,
+            t: t),
         isTrue);
+    // t is part of the digest.
+    expect(
+        b64(powDigest(r['contentKey'] as String, p, rating, r['n'] as int,
+            t: t + 1)),
+        isNot(r['digest']));
   });
 
   test('ratingCases', () {
@@ -115,7 +140,8 @@ void main() {
       final rating = c['r'] as num?;
       expect(ratingText(rating), c['ratingText']);
       expect(
-          b64(powDigest(r['contentKey'] as String, p, rating, c['n'] as int)),
+          b64(powDigest(r['contentKey'] as String, p, rating, c['n'] as int,
+              t: c['t'] as int)),
           c['digest']);
     }
   });
@@ -134,8 +160,9 @@ void main() {
   test('solvePow / solvePowAsync agree', () async {
     final r = v['rating'] as Map<String, dynamic>;
     final k = r['contentKey'] as String, p = r['pseudonym'] as String;
-    final n = solvePow(k, p, 7.5, 8);
-    expect(powOk(k, p, 7.5, n, 8), isTrue);
-    expect(await solvePowAsync(k, p, 7.5, 8, yieldEvery: 7), n);
+    final t = r['t'] as int;
+    final n = solvePow(k, p, 7.5, 8, t: t);
+    expect(powOk(k, p, 7.5, n, 8, t: t), isTrue);
+    expect(await solvePowAsync(k, p, 7.5, 8, t: t, yieldEvery: 7), n);
   });
 }

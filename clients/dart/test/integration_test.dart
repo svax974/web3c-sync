@@ -111,8 +111,7 @@ void main() {
     );
     await b.join(link.token, 'Apple TV salon');
     // single use
-    final c2 = await newClient(await DeviceKey.generate(),
-        gid: gid, kg: kg);
+    final c2 = await newClient(await DeviceKey.generate(), gid: gid, kg: kg);
     await expectLater(
         c2.join(link.token, 'x'), throwsA(isA<ForbiddenException>()));
 
@@ -124,14 +123,16 @@ void main() {
   });
 
   test('encrypted exchange between two devices', () async {
-    final seq = await owner.putDoc('progress', 'movie_1', {'pos': 12, 'dur': 100},
+    final seq = await owner.putDoc(
+        'progress', 'movie_1', {'pos': 12, 'dur': 100},
         updatedAt: 1000, ifMatchSeq: 0);
     final got = await b.getDoc('progress', 'movie_1');
     expect(got.payload, {'pos': 12, 'dur': 100});
     expect(got.logicalId, 'movie_1');
     expect(got.updatedAt, 1000);
     expect(got.seq, seq);
-    await expectLater(b.getDoc('progress', 'nope'), throwsA(isA<NotFoundException>()));
+    await expectLater(
+        b.getDoc('progress', 'nope'), throwsA(isA<NotFoundException>()));
   });
 
   test('stale If-Match gives Conflict with the current seq', () async {
@@ -144,7 +145,8 @@ void main() {
 
   test('upsert resolves a 409 race (latest inner updatedAt wins)', () async {
     // Create baseline.
-    await owner.putDoc('prefs', 'p', {'v': 'base'}, updatedAt: 100, ifMatchSeq: 0);
+    await owner.putDoc('prefs', 'p', {'v': 'base'},
+        updatedAt: 100, ifMatchSeq: 0);
     var fired = false;
     hook.before = (req) async {
       // Just before the owner's first PUT, B writes a newer version.
@@ -156,7 +158,8 @@ void main() {
       }
     };
     // Owner's value is older than B's: B must win after the retry.
-    final r = await owner.upsert('prefs', 'p', {'v': 'owner-old'}, updatedAt: 300);
+    final r =
+        await owner.upsert('prefs', 'p', {'v': 'owner-old'}, updatedAt: 300);
     expect(fired, isTrue);
     hook.before = null;
     expect(r.payload, {'v': 'from-b'});
@@ -168,7 +171,8 @@ void main() {
     expect((await b.getDoc('prefs', 'p')).payload, {'v': 'newest'});
 
     // Custom merge.
-    final m = await b.upsert('prefs', 'p', {'n': 1}, updatedAt: 1000,
+    final m = await b.upsert('prefs', 'p', {'n': 1},
+        updatedAt: 1000,
         merge: (l, r) => Versioned(
             {...(r.payload as Map), ...(l.payload as Map)}, l.updatedAt));
     expect(m.payload, {'v': 'newest', 'n': 1});
@@ -190,22 +194,28 @@ void main() {
 
   test('tombstone: 410, changes, re-creation', () async {
     final cur = await owner.getDoc('progress', 'movie_1');
-    final ts = await owner.deleteDoc('progress', 'movie_1', ifMatchSeq: cur.seq);
+    final ts =
+        await owner.deleteDoc('progress', 'movie_1', ifMatchSeq: cur.seq);
     await expectLater(b.getDoc('progress', 'movie_1'),
         throwsA(isA<GoneException>().having((e) => e.seq, 'seq', ts)));
     final page = await b.changesAll(0);
     final id = owner.docIdFor('progress', 'movie_1');
-    expect(page.items.whereType<Tombstone>().any((t) => t.docId == id && t.seq == ts),
+    expect(
+        page.items
+            .whereType<Tombstone>()
+            .any((t) => t.docId == id && t.seq == ts),
         isTrue);
     // upsert re-creates over the tombstone.
-    final r = await owner.upsert('progress', 'movie_1', {'pos': 1}, updatedAt: 2000);
+    final r =
+        await owner.upsert('progress', 'movie_1', {'pos': 1}, updatedAt: 2000);
     expect(r.seq, greaterThan(ts));
     expect((await b.getDoc('progress', 'movie_1')).payload, {'pos': 1});
   });
 
   test('paginated changes', () async {
     for (var i = 0; i < 7; i++) {
-      await owner.putDoc('lists', 'l$i', {'i': i}, updatedAt: 10 + i, ifMatchSeq: 0);
+      await owner.putDoc('lists', 'l$i', {'i': i},
+          updatedAt: 10 + i, ifMatchSeq: 0);
     }
     final first = await b.changes(0, limit: 3);
     expect(first.items.length, 3);
@@ -245,7 +255,8 @@ void main() {
   test('blobs with range', () async {
     await owner.putBlob('blob1', utf8.encode('0123456789'));
     expect(utf8.decode(await b.getBlob('blob1')), '0123456789');
-    expect(utf8.decode(await b.getBlob('blob1', rangeStart: 2, rangeEnd: 5)), '2345');
+    expect(utf8.decode(await b.getBlob('blob1', rangeStart: 2, rangeEnd: 5)),
+        '2345');
     await owner.deleteBlob('blob1');
     await expectLater(b.getBlob('blob1'), throwsA(isA<NotFoundException>()));
   });
@@ -257,12 +268,15 @@ void main() {
     final c = await newClient(cKey, gid: gid, kg: wrong);
     await c.join(link.token, 'intrus');
     // Names are unreadable for the owner too (K_name differs).
-    expect((await owner.members()).firstWhere((m) => m.device == cKey.publicKeyB64).name,
+    expect(
+        (await owner.members())
+            .firstWhere((m) => m.device == cKey.publicKeyB64)
+            .name,
         isNull);
     // Same doc under the wrong K_id is simply unknown; with the right docId the
     // envelope still fails to open.
-    await expectLater(c.getDoc('progress', 'movie_1'),
-        throwsA(isA<NotFoundException>()));
+    await expectLater(
+        c.getDoc('progress', 'movie_1'), throwsA(isA<NotFoundException>()));
     final page = await c.changesAll(0);
     final docs = page.items.where((i) => i is! Tombstone).toList();
     expect(docs, isNotEmpty);
@@ -294,8 +308,12 @@ void main() {
   });
 
   test('community ratings: vote + PoW + aggregate', () async {
-    final com = CommunityClient(url, powBits);
-    final kUser = deriveKeys(kg).id;
+    var tick = DateTime.now().millisecondsSinceEpoch;
+    // Each call is one second later: a vote must be strictly newer than the
+    // previous vote of the same pseudonym.
+    final com = CommunityClient(url, powBits,
+        clock: () => DateTime.fromMillisecondsSinceEpoch(tick += 1000));
+    final kUser = deriveKeys(kg).rating;
     const key = 'movie:tmdb:603';
     await com.vote(key, 'profile-1', kUser, 8);
     await com.vote(key, 'profile-2', kUser, 4.5);
@@ -313,7 +331,8 @@ void main() {
     await expectLater(com.vote(key, 'profile-1', kUser, 11),
         throwsA(isA<BadRequestException>()));
     // Insufficient PoW refused.
-    final weak = CommunityClient(url, 0);
+    final weak = CommunityClient(url, 0,
+        clock: () => DateTime.fromMillisecondsSinceEpoch(tick += 1000));
     var refused = false;
     for (var i = 0; i < 40 && !refused; i++) {
       try {
@@ -323,8 +342,60 @@ void main() {
       }
     }
     expect(refused, isTrue);
+    // A vote older than (or equal to) the stored one is refused: replay.
+    final old = CommunityClient(url, powBits,
+        clock: () => DateTime.fromMillisecondsSinceEpoch(tick - 600 * 1000));
+    await expectLater(old.vote(key, 'profile-1', kUser, 1),
+        throwsA(isA<ConflictException>()));
+    // Same instant as the stored vote: also 409.
+    final same = CommunityClient(url, powBits,
+        clock: () => DateTime.fromMillisecondsSinceEpoch(tick));
+    await com.vote('movie:tmdb:7', 'p', kUser, 3);
+    await expectLater(same.vote('movie:tmdb:7', 'p', kUser, 4),
+        throwsA(isA<ConflictException>()));
     com.close();
     weak.close();
+    old.close();
+    same.close();
+  });
+
+  test('authenticated deletion marker round trip; counters increase', () async {
+    final w = await owner.upsert('prefs', 'm1', {'a': 1}, updatedAt: 10);
+    expect(w.counter, 1);
+    final w2 = await owner.upsert('prefs', 'm1', {'a': 2}, updatedAt: 20);
+    expect(w2.counter, 2);
+    // putDoc without explicit counter reads the remote c.
+    final s3 = await owner.putDoc('prefs', 'm1', {'a': 3},
+        updatedAt: 30, ifMatchSeq: w2.seq);
+    expect((await owner.getDoc('prefs', 'm1')).counter, 3);
+    final seq =
+        await owner.putMarker('prefs', 'm1', updatedAt: 40, ifMatchSeq: s3);
+    final got = await owner.getDoc('prefs', 'm1');
+    expect(got.deleted, isTrue);
+    expect(got.payload, isNull);
+    expect(got.counter, 4);
+    expect(got.seq, seq);
+    final page = await owner.changesAll(0);
+    final id = owner.docIdFor('prefs', 'm1');
+    final dc =
+        page.items.whereType<DocChange>().firstWhere((d) => d.docId == id);
+    expect(dc.deleted, isTrue);
+    expect(dc.counter, 4);
+    expect(dc.isAuthenticated, isTrue);
+    // Rollback detection against a floor above the stored counter.
+    final floored = Web3CSyncClient(
+      baseUrl: url,
+      instance: 'iptv',
+      deviceKey: ownerKey,
+      groupId: gid,
+      groupKey: kg,
+      counterFloor: (c, d) => d == id ? 9 : null,
+    );
+    await expectLater(
+        floored.getDoc('prefs', 'm1'), throwsA(isA<RollbackException>()));
+    final fp = await floored.changesAll(0);
+    expect(fp.items.whereType<RolledBack>().single.floor, 9);
+    floored.close();
   });
 
   test('purge group', () async {

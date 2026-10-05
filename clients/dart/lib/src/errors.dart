@@ -64,6 +64,30 @@ class IntegrityException implements Exception {
   String toString() => 'IntegrityException';
 }
 
+/// A document was received that is well-formed on the wire but invalid as a
+/// v1 plaintext (e.g. missing or non-integer `c`). [reason] says why.
+class InvalidDocumentException implements Exception {
+  const InvalidDocumentException(this.reason);
+  final String reason;
+  @override
+  String toString() => 'InvalidDocumentException($reason)';
+}
+
+/// The server went backwards: a document whose counter `c` is below the known
+/// floor ([collection]/[docId]/[counter]/[floor] set), or a `changes` cursor
+/// that decreased (only [reason] set). Spec 3 (anti-rollback).
+class RollbackException implements Exception {
+  const RollbackException(this.reason,
+      {this.collection, this.docId, this.counter, this.floor});
+  final String reason;
+  final String? collection;
+  final String? docId;
+  final int? counter;
+  final int? floor;
+  @override
+  String toString() => 'RollbackException($reason)';
+}
+
 Map<String, dynamic> _errBody(http.BaseResponse r, List<int>? body) {
   if (body == null || body.isEmpty) return const {};
   try {
@@ -101,6 +125,8 @@ void checkResponse(http.Response r) {
       final s = int.tryParse(r.headers['retry-after'] ?? '');
       throw RateLimitedException(s == null ? null : Duration(seconds: s));
     default:
+      // 3xx included: redirects are never followed (a redirect could move a
+      // signed request to another host), so they surface as errors.
       throw ServerException(r.statusCode, code);
   }
 }

@@ -15,14 +15,16 @@ void main() {
   });
 
   test('nonce is random', () async {
-    expect(await seal(keys.enc, a, plain), isNot(await seal(keys.enc, a, plain)));
+    expect(
+        await seal(keys.enc, a, plain), isNot(await seal(keys.enc, a, plain)));
   });
 
   test('tampering rejected', () async {
     final env = await seal(keys.enc, a, plain);
     for (final i in [0, 1, 13, env.length - 1]) {
       final bad = List<int>.from(env)..[i] ^= 1;
-      await expectLater(open(keys.enc, a, bad), throwsA(isA<DecryptException>()));
+      await expectLater(
+          open(keys.enc, a, bad), throwsA(isA<DecryptException>()));
     }
     await expectLater(open(keys.enc, a, env.sublist(0, 20)),
         throwsA(isA<DecryptException>()));
@@ -31,7 +33,8 @@ void main() {
   test('wrong key rejected', () async {
     final env = await seal(keys.enc, a, plain);
     final other = deriveKeys(List.filled(32, 8));
-    await expectLater(open(other.enc, a, env), throwsA(isA<DecryptException>()));
+    await expectLater(
+        open(other.enc, a, env), throwsA(isA<DecryptException>()));
   });
 
   test('AAD bound to instance, group, collection, doc', () async {
@@ -42,7 +45,8 @@ void main() {
       aad('iptv', 'g', 'ratings', 'd'),
       aad('iptv', 'g', 'progress', 'e'),
     ]) {
-      await expectLater(open(keys.enc, bad, env), throwsA(isA<DecryptException>()));
+      await expectLater(
+          open(keys.enc, bad, env), throwsA(isA<DecryptException>()));
     }
   });
 
@@ -82,9 +86,16 @@ void main() {
     expect(p.groupId, link.groupId);
     expect(p.groupKey, link.groupKey);
     expect(p.tlsFingerprint, 'AB:CD');
-    expect(GroupLink.parse(GroupLink(server: 's', instance: 'i',
-        groupId: link.groupId, token: 't', groupKey: link.groupKey).format())
-        .tlsFingerprint, isNull);
+    expect(
+        GroupLink.parse(GroupLink(
+                    server: 's',
+                    instance: 'i',
+                    groupId: link.groupId,
+                    token: 't',
+                    groupKey: link.groupKey)
+                .format())
+            .tlsFingerprint,
+        isNull);
     expect(() => GroupLink.parse('http://x'), throwsFormatException);
     expect(() => GroupLink.parse('web3c-link:v1?s=a'), throwsFormatException);
     expect(link.groupKey.length, 32);

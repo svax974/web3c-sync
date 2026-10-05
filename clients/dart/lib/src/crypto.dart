@@ -72,10 +72,13 @@ Uint8List fields(List<String> parts) =>
     Uint8List.fromList([for (final p in parts) ...field(utf8.encode(p))]);
 
 class DerivedKeys {
-  const DerivedKeys(this.enc, this.id, this.name);
+  const DerivedKeys(this.enc, this.id, this.name, this.rating);
   final Uint8List enc;
   final Uint8List id;
   final Uint8List name;
+
+  /// K_rating (HKDF info "rating"): pseudonyms of public ratings only.
+  final Uint8List rating;
 }
 
 DerivedKeys deriveKeys(List<int> kg) {
@@ -84,6 +87,7 @@ DerivedKeys deriveKeys(List<int> kg) {
     hkdf(kg, salt, 'enc'),
     hkdf(kg, salt, 'id'),
     hkdf(kg, salt, 'name'),
+    hkdf(kg, salt, 'rating'),
   );
 }
 
@@ -225,16 +229,29 @@ String _expandExponent(String s) {
   return neg ? '-$out' : out;
 }
 
-String pseudonym(List<int> kUser, String profileId, String contentKey) =>
-    b64(hmacSha256(kUser, fields(['rating', profileId, contentKey])));
+/// Public-rating pseudonym (spec 9). [kRating] is K_rating (`DerivedKeys.rating`)
+/// of the group, or a random per-device local key for an unsynced profile.
+String pseudonym(List<int> kRating, String profileId, String contentKey) =>
+    b64(hmacSha256(kRating, fields(['rating', profileId, contentKey])));
 
-Uint8List powDigest(String contentKey, String pseudonym, num? r, int n) {
-  final u64 = ByteData(8)..setUint64(0, n);
+/// SHA-256(field(contentKey) || field(p) || canonical(r) || u64(t) || u64(n)).
+/// [t] is the vote time in epoch seconds (spec 9); it is mandatory, since a
+/// digest computed without it would be rejected by the server.
+Uint8List powDigest(
+  String contentKey,
+  String pseudonym,
+  num? r,
+  int n, {
+  required int t,
+}) {
+  final tb = ByteData(8)..setUint64(0, t);
+  final nb = ByteData(8)..setUint64(0, n);
   return sha256([
     ...field(utf8.encode(contentKey)),
     ...field(utf8.encode(pseudonym)),
     ...utf8.encode(ratingText(r)),
-    ...u64.buffer.asUint8List(),
+    ...tb.buffer.asUint8List(),
+    ...nb.buffer.asUint8List(),
   ]);
 }
 
@@ -250,14 +267,22 @@ int leadingZeroBits(List<int> h) {
   return n;
 }
 
-bool powOk(String contentKey, String pseudonym, num? r, int n, int powBits) =>
-    leadingZeroBits(powDigest(contentKey, pseudonym, r, n)) >= powBits;
+bool powOk(
+  String contentKey,
+  String pseudonym,
+  num? r,
+  int n,
+  int powBits, {
+  required int t,
+}) =>
+    leadingZeroBits(powDigest(contentKey, pseudonym, r, n, t: t)) >= powBits;
 
-/// Smallest nonce satisfying the proof of work. CPU-bound: prefer
-/// [solvePowAsync] on a UI isolate.
-int solvePow(String contentKey, String pseudonym, num? r, int powBits) {
+/// Smallest nonce satisfying the proof of work for vote time [t]. CPU-bound:
+/// prefer [solvePowAsync] on a UI isolate.
+int solvePow(String contentKey, String pseudonym, num? r, int powBits,
+    {required int t}) {
   for (var n = 0;; n++) {
-    if (powOk(contentKey, pseudonym, r, n, powBits)) return n;
+    if (powOk(contentKey, pseudonym, r, n, powBits, t: t)) return n;
   }
 }
 
@@ -268,10 +293,11 @@ Future<int> solvePowAsync(
   String pseudonym,
   num? r,
   int powBits, {
+  required int t,
   int yieldEvery = 2000,
 }) async {
   for (var n = 0;; n++) {
-    if (powOk(contentKey, pseudonym, r, n, powBits)) return n;
+    if (powOk(contentKey, pseudonym, r, n, powBits, t: t)) return n;
     if (n % yieldEvery == yieldEvery - 1) {
       await Future<void>.delayed(Duration.zero);
     }

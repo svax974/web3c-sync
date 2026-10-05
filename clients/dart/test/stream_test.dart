@@ -14,23 +14,21 @@ void main() {
       expect(req.headers['X-Signature'], isNotEmpty);
       if (n == 1) {
         return http.StreamedResponse(
-          Stream.value(utf8.encode(
-              ': ping\n\nid: 5\nevent: change\n'
+          Stream.value(utf8.encode(': ping\n\nid: 5\nevent: change\n'
               'data: {"collection":"progress","docId":"d","seq":5,"deleted":false}\n\n')),
           200,
         );
       }
       if (n == 2) throw http.ClientException('boom');
       return http.StreamedResponse(
-        Stream.value(utf8.encode(
-            'id: 6\nevent: change\n'
+        Stream.value(utf8.encode('id: 6\nevent: change\n'
             'data: {"collection":"progress","docId":"d","seq":6,"deleted":true}\n\n')),
         200,
       );
     });
     final key = await DeviceKey.generate();
     final c = Web3CSyncClient(
-      baseUrl: 'http://x.test',
+      baseUrl: 'https://x.test',
       instance: 'iptv',
       deviceKey: key,
       groupId: GroupLink.generateGroupId(),
@@ -48,16 +46,17 @@ void main() {
   });
 
   test('401 on the stream is terminal', () async {
-    final mock = MockClient.streaming((req, _) async =>
-        http.StreamedResponse(Stream.value(utf8.encode('{"error":"unauthorized"}')), 401));
+    final mock = MockClient.streaming((req, _) async => http.StreamedResponse(
+        Stream.value(utf8.encode('{"error":"unauthorized"}')), 401));
     final c = Web3CSyncClient(
-      baseUrl: 'http://x.test',
+      baseUrl: 'https://x.test',
       instance: 'iptv',
       deviceKey: await DeviceKey.generate(),
       groupId: GroupLink.generateGroupId(),
       groupKey: GroupLink.generateGroupKey(),
       httpClient: mock,
     );
-    await expectLater(c.stream(0).toList(), throwsA(isA<UnauthorizedException>()));
+    await expectLater(
+        c.stream(0).toList(), throwsA(isA<UnauthorizedException>()));
   });
 }

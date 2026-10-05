@@ -11,6 +11,7 @@ import 'device_key.dart';
 import 'errors.dart';
 import 'group_link.dart';
 import 'tls_pinning.dart';
+import 'transport.dart';
 
 /// Collection used for encrypted device names (join / members).
 const nameCollection = '_name';
@@ -66,15 +67,30 @@ class DocRecord {
     required this.payload,
     required this.updatedAt,
     required this.seq,
-  });
+    this.counter = 0,
+    this.deleted = false,
+    int? rawUpdatedAt,
+  }) : rawUpdatedAt = rawUpdatedAt ?? updatedAt;
   final String collection;
   final String logicalId;
   final String docId;
+
+  /// Payload `d`; null for a deletion marker ([deleted]).
   final Object? payload;
 
-  /// Inner `u` (epoch ms), set by the writing client.
+  /// Inner `u` (epoch ms), set by the writing client, clamped to now + 5 min
+  /// (spec 3): use this for every comparison.
   final int updatedAt;
+
+  /// `u` exactly as stored in the document (may be in the future).
+  final int rawUpdatedAt;
   final int seq;
+
+  /// Per-document counter `c` (>= 1 for a document read from the server).
+  final int counter;
+
+  /// True for an authenticated deletion marker (`del:true`).
+  final bool deleted;
 }
 
 sealed class ChangeItem {
@@ -82,16 +98,44 @@ sealed class ChangeItem {
   final String collection;
   final String docId;
   final int seq;
+
+  /// Whether the item's content is cryptographically authenticated. Only a
+  /// [DocChange] is; engines must not act on anything else.
+  bool get isAuthenticated => false;
 }
 
 class DocChange extends ChangeItem {
   DocChange(this.record) : super(record.collection, record.docId, record.seq);
   final DocRecord record;
+
+  @override
+  bool get isAuthenticated => true;
+
+  /// Counter `c` of the document.
+  int get counter => record.counter;
+
+  /// True when the document is an authenticated deletion marker (`del:true`).
+  bool get deleted => record.deleted;
+
+  /// `u` clamped to now + 5 min.
+  int get updatedAt => record.updatedAt;
+
+  /// `u` as stored.
+  int get rawUpdatedAt => record.rawUpdatedAt;
 }
 
+/// A server-side tombstone (spec 7 `DELETE`).
+///
+/// It is NOT authenticated: the server (or anyone who can write its database)
+/// can forge it. Engines must ignore it and only honour decrypted `del`
+/// markers ([DocChange.deleted]); at most report it. [isAuthenticated] is
+/// always false.
 class Tombstone extends ChangeItem {
   const Tombstone(super.collection, super.docId, super.seq,
       [this.updatedAt = 0]);
+
+  @override
+  bool get isAuthenticated => false;
 
   /// Server time of the deletion, epoch seconds (0 when unknown).
   final int updatedAt;
@@ -102,6 +146,15 @@ class Tombstone extends ChangeItem {
 class Undecryptable extends ChangeItem {
   const Undecryptable(super.collection, super.docId, super.seq, this.error);
   final Object error;
+}
+
+/// A document whose counter `c` is below the caller's floor
+/// (`counterFloor`): a rollback by the server. It must not be applied.
+class RolledBack extends ChangeItem {
+  const RolledBack(
+      super.collection, super.docId, super.seq, this.counter, this.floor);
+  final int counter;
+  final int floor;
 }
 
 class ChangesPage {
@@ -146,7 +199,8 @@ class Web3CSyncClient {
     this.sseBackoffMin = const Duration(seconds: 1),
     this.sseBackoffMax = const Duration(seconds: 30),
     this.sseIdleTimeout = const Duration(seconds: 70),
-  })  : baseUrl = baseUrl.replaceFirst(RegExp(r'/+$'), ''),
+    this.counterFloor,
+  })  : baseUrl = checkBaseUrl(baseUrl),
         _http = httpClient ??
             (tlsFingerprint != null
                 ? pinnedHttpClient(tlsFingerprint)
@@ -155,10 +209,25 @@ class Web3CSyncClient {
     this.groupKey = groupKey;
   }
 
+  /// Server base URL. `https://`, or `http://` on a loopback host only
+  /// ([ArgumentError] otherwise). Redirects are never followed (a 3xx is a
+  /// [ServerException]).
   final String baseUrl;
   final String instance;
+
+  /// Anti-rollback hook: the greatest counter `c` the caller has already seen
+  /// for ([collection], [docId]) (docId = pseudonymised id), or null. A
+  /// document with a lower `c` is reported as [RolledBack] by [changes] and
+  /// raises [RollbackException] from [getDoc]/[upsert].
+  final int? Function(String collection, String docId)? counterFloor;
   final DeviceKey deviceKey;
   final String? adminToken;
+
+  /// SHA-256 of the server's leaf certificate (DER), hex or base64url. When set
+  /// (and no [httpClient] is injected) system roots are disabled and only that
+  /// exact leaf is accepted: no CA, no hostname check, so the pin must be
+  /// renewed with the certificate. A malformed value throws [FormatException]
+  /// at construction (fail closed).
   final String? tlsFingerprint;
   final Duration sseBackoffMin, sseBackoffMax, sseIdleTimeout;
   final http.Client _http;
@@ -224,7 +293,9 @@ class Web3CSyncClient {
     Map<String, String> headers = const {},
   }) async {
     final (uri, target) = _target(pathQuery);
-    final req = http.Request(method, uri)..bodyBytes = body;
+    final req = http.Request(method, uri)
+      ..followRedirects = false
+      ..bodyBytes = body;
     req.headers.addAll(headers);
     req.headers.addAll(await _signedHeaders(method, target, body));
     return req;
@@ -368,27 +439,39 @@ class Web3CSyncClient {
   String _docPath(String collection, String docId) =>
       '/v1/g/$_gid/d/$collection/$docId';
 
-  /// Writes a document and returns its new seq. [ifMatchSeq] is 0 for a
-  /// creation, otherwise the seq the caller based its change on (the
-  /// tombstone's seq to re-create a deleted document).
-  Future<int> putDoc(
+  /// Next counter: max(known floor, remote `c`) + 1. [ifMatchSeq] 0 means a
+  /// creation, so no remote read is needed.
+  Future<int> _nextCounter(
+      String collection, String logicalId, int ifMatchSeq) async {
+    final id = docIdFor(collection, logicalId);
+    var known = counterFloor?.call(collection, id) ?? 0;
+    if (ifMatchSeq != 0) {
+      try {
+        final res = await _send('GET', _docPath(collection, id));
+        final seq = int.tryParse(res.headers['x-seq'] ?? '') ?? -1;
+        final rec = await _decryptDoc(collection, id, res.bodyBytes, seq,
+            checkFloor: false);
+        if (rec.counter > known) known = rec.counter;
+      } on NotFoundException {
+        // nothing there
+      } on GoneException {
+        // server tombstone: no counter to read
+      }
+    }
+    return known + 1;
+  }
+
+  Future<int> _put(
     String collection,
     String logicalId,
-    Object? payload, {
-    required int updatedAt,
+    Map<String, Object?> body, {
     required int ifMatchSeq,
   }) async {
     final id = docIdFor(collection, logicalId);
-    final plain = utf8.encode(jsonEncode({
-      'v': 1,
-      'u': updatedAt,
-      'k': logicalId,
-      'd': payload,
-    }));
     final env = await c.seal(
       _k.enc,
       c.aad(instance, _gid, collection, id),
-      plain,
+      utf8.encode(jsonEncode(body)),
     );
     final res = await _send(
       'PUT',
@@ -402,8 +485,51 @@ class Web3CSyncClient {
     return (_json(res)['seq'] as num).toInt();
   }
 
+  /// Writes a document and returns its new seq. [ifMatchSeq] is 0 for a
+  /// creation, otherwise the seq the caller based its change on (the
+  /// tombstone's seq to re-create a deleted document).
+  ///
+  /// [counter] is the document counter `c` (>= 1). When omitted it is
+  /// max(`counterFloor`, remote `c`) + 1 (one extra GET unless [ifMatchSeq]
+  /// is 0). Pass it explicitly when you already know it.
+  Future<int> putDoc(
+    String collection,
+    String logicalId,
+    Object? payload, {
+    required int updatedAt,
+    required int ifMatchSeq,
+    int? counter,
+  }) async {
+    final cnt =
+        counter ?? await _nextCounter(collection, logicalId, ifMatchSeq);
+    if (cnt < 1) throw ArgumentError.value(cnt, 'counter', 'must be >= 1');
+    return _put(collection, logicalId,
+        {'v': 1, 'u': updatedAt, 'c': cnt, 'k': logicalId, 'd': payload},
+        ifMatchSeq: ifMatchSeq);
+  }
+
+  /// Writes an authenticated deletion marker `{"v":1,"u","c","k","del":true}`
+  /// (no `d`) and returns its seq. Same rules as [putDoc] for [counter] and
+  /// [ifMatchSeq]. This, not [deleteDoc], is how a v1 client deletes.
+  Future<int> putMarker(
+    String collection,
+    String logicalId, {
+    required int updatedAt,
+    required int ifMatchSeq,
+    int? counter,
+  }) async {
+    final cnt =
+        counter ?? await _nextCounter(collection, logicalId, ifMatchSeq);
+    if (cnt < 1) throw ArgumentError.value(cnt, 'counter', 'must be >= 1');
+    return _put(collection, logicalId,
+        {'v': 1, 'u': updatedAt, 'c': cnt, 'k': logicalId, 'del': true},
+        ifMatchSeq: ifMatchSeq);
+  }
+
   /// Fetches and decrypts a document. Throws [NotFoundException],
-  /// [GoneException] (tombstone), [DecryptException] or [IntegrityException].
+  /// [GoneException] (tombstone), [DecryptException], [IntegrityException],
+  /// [InvalidDocumentException] or [RollbackException] (`c` below
+  /// `counterFloor`). A deletion marker is returned with `deleted == true`.
   Future<DocRecord> getDoc(String collection, String logicalId) async {
     final id = docIdFor(collection, logicalId);
     final res = await _send('GET', _docPath(collection, id));
@@ -415,8 +541,9 @@ class Web3CSyncClient {
     String collection,
     String docId,
     List<int> env,
-    int seq,
-  ) async {
+    int seq, {
+    bool checkFloor = true,
+  }) async {
     final plain = await c.open(
       _k.enc,
       c.aad(instance, _gid, collection, docId),
@@ -431,18 +558,39 @@ class Web3CSyncClient {
     if (j is! Map || j['v'] != 1 || j['k'] is! String || j['u'] is! num) {
       throw const c.DecryptException();
     }
+    if (j['c'] is! int || (j['c'] as int) < 1) {
+      throw const InvalidDocumentException(
+          'missing or invalid counter "c" (integer >= 1 required)');
+    }
+    final deleted = j['del'] == true;
+    if (j.containsKey('del') && j['del'] is! bool) {
+      throw const InvalidDocumentException('"del" must be a boolean');
+    }
     final k = j['k'] as String;
     // The server could swap documents between identifiers: bind k to docId.
     if (c.docId(_k.id, collection, k) != docId) {
       throw const IntegrityException();
     }
+    final cnt = j['c'] as int;
+    if (checkFloor) {
+      final floor = counterFloor?.call(collection, docId);
+      if (floor != null && cnt < floor) {
+        throw RollbackException('document counter below known floor',
+            collection: collection, docId: docId, counter: cnt, floor: floor);
+      }
+    }
+    final raw = (j['u'] as num).toInt();
+    final cap = _clock().millisecondsSinceEpoch + 5 * 60 * 1000;
     return DocRecord(
       collection: collection,
       logicalId: k,
       docId: docId,
-      payload: j['d'],
-      updatedAt: (j['u'] as num).toInt(),
+      payload: deleted ? null : j['d'],
+      updatedAt: raw > cap ? cap : raw,
+      rawUpdatedAt: raw,
       seq: seq,
+      counter: cnt,
+      deleted: deleted,
     );
   }
 
@@ -463,7 +611,8 @@ class Web3CSyncClient {
   /// Optimistic read-merge-write. Writes [payload] (stamped [updatedAt], now by
   /// default); when a remote version exists, [merge] decides (default:
   /// [lastWriteWins]). On 409 the remote is re-read and merged again, up to
-  /// [maxAttempts]. If the merge keeps the remote unchanged nothing is written.
+  /// [maxAttempts]. The written counter is max(`counterFloor`, remote `c`) + 1
+  /// unless [counter] is given. If the merge keeps the remote unchanged nothing is written.
   Future<DocRecord> upsert(
     String collection,
     String logicalId,
@@ -471,6 +620,7 @@ class Web3CSyncClient {
     int? updatedAt,
     MergeFn merge = lastWriteWins,
     int maxAttempts = 5,
+    int? counter,
   }) async {
     final local =
         Versioned(payload, updatedAt ?? _clock().millisecondsSinceEpoch);
@@ -478,9 +628,12 @@ class Web3CSyncClient {
     for (var i = 0; i < maxAttempts; i++) {
       var seq = 0;
       var toWrite = local;
+      var known =
+          counterFloor?.call(collection, docIdFor(collection, logicalId)) ?? 0;
       try {
         final remote = await getDoc(collection, logicalId);
         seq = remote.seq;
+        if (remote.counter > known) known = remote.counter;
         final r = Versioned(remote.payload, remote.updatedAt);
         toWrite = merge(local, r);
         if (identical(toWrite, r) ||
@@ -500,6 +653,7 @@ class Web3CSyncClient {
           toWrite.payload,
           updatedAt: toWrite.updatedAt,
           ifMatchSeq: seq,
+          counter: counter ?? known + 1,
         );
         return DocRecord(
           collection: collection,
@@ -508,6 +662,7 @@ class Web3CSyncClient {
           payload: toWrite.payload,
           updatedAt: toWrite.updatedAt,
           seq: newSeq,
+          counter: counter ?? known + 1,
         );
       } on ConflictException catch (e) {
         last = e;
@@ -518,6 +673,9 @@ class Web3CSyncClient {
 
   // ---------- changes / stream ----------
 
+  /// One page of changes. Items: [DocChange] (authenticated), [Tombstone]
+  /// (NOT authenticated: ignore it), [Undecryptable], [RolledBack]. Throws
+  /// [RollbackException] when the server's `next` is lower than [since].
   Future<ChangesPage> changes(int since, {int limit = 500}) async {
     final res = await _send(
       'GET',
@@ -537,21 +695,32 @@ class Web3CSyncClient {
       try {
         final env = c.unb64(it['env'] as String);
         items.add(DocChange(await _decryptDoc(coll, id, env, seq)));
+      } on RollbackException catch (e) {
+        items.add(RolledBack(coll, id, seq, e.counter ?? 0, e.floor ?? 0));
       } catch (e) {
         items.add(Undecryptable(coll, id, seq, e));
       }
     }
-    return ChangesPage(items, (j['next'] as num).toInt(), j['more'] == true);
+    final next = (j['next'] as num).toInt();
+    if (next < since) {
+      throw RollbackException('changes cursor went backwards ($next < $since)');
+    }
+    return ChangesPage(items, next, j['more'] == true);
   }
 
   /// Follows `more` until the end. The result has `more == false`.
-  Future<ChangesPage> changesAll(int since, {int pageSize = 500}) async {
+  ///
+  /// Stops when the cursor does not progress, and throws [ServerException]
+  /// after [maxPages] pages (a hostile server cannot make it loop forever).
+  Future<ChangesPage> changesAll(int since,
+      {int pageSize = 500, int maxPages = 10000}) async {
     final all = <ChangeItem>[];
     var next = since;
-    while (true) {
+    for (var i = 0;; i++) {
+      if (i >= maxPages) throw const ServerException(200, 'too_many_pages');
       final p = await changes(next, limit: pageSize);
       all.addAll(p.items);
-      if (p.next < next) break;
+      if (p.next <= next) break;
       next = p.next;
       if (!p.more) break;
     }
@@ -579,6 +748,7 @@ class Web3CSyncClient {
           );
           final abortable =
               http.AbortableRequest('GET', req.url, abortTrigger: abort.future)
+                ..followRedirects = false
                 ..headers.addAll(req.headers);
           final res = await _http.send(abortable);
           if (res.statusCode != 200) {
