@@ -59,7 +59,7 @@ var defaultMaxDocs = map[string]int{"iptv": 20000, "banking": 20000, "aiteam": 5
 var defaultMaxBytesMiB = map[string]int{"iptv": 64, "banking": 64, "aiteam": 256}
 
 var defaultCollections = map[string]string{
-	"iptv": "profiles,progress,ratings,favorites,lists,order,sources,prefs",
+	"iptv": "profiles,progress,ratings,favorites,lists,order,sources,prefs,tmdbcache",
 }
 
 func env(k, d string) string {

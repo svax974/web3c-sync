@@ -34,7 +34,7 @@ même façon aux trois : un seul format sur le fil.
 
 ## 2. Collections (noms autorisés sur l'instance `iptv`)
 
-`profiles, progress, ratings, favorites, lists, order, sources, prefs`
+`profiles, progress, ratings, favorites, lists, order, sources, prefs, tmdbcache`
 (`_name` est réservé au nom d'appareil, chiffré avec `K_name`.)
 
 Pour chaque document, `k` (identifiant logique, voir PROTOCOL §3) et `d` (charge
@@ -51,6 +51,16 @@ modification locale** (jamais à l'instant de la synchro).
 | `order` | `{profileId}` | `{map:{"{src}_{streamId}": n}}` | `channel_order_{pid}` / `channel_order.json` |
 | `sources` | `sourceKey` | `{name, type (xtream\|m3u), server?, user?, pass?, m3u?, epg?, active}` (`xmltvUrl` et infos de compte restent locaux) | box `playlists` / `playlists.json` |
 | `prefs` | `app` | voir §4 | `AppSettings` / `settings.json` |
+| `tmdbcache` | `s000` … `s127` (un fragment par document) | `{v:1, e:{clé de cache: entrée}}` : les réponses de TMDB déjà obtenues (correspondance titre → id, plateformes de streaming, sorties en salle), partagées pour qu'un appareil ne réinterroge pas TMDB pour tout le catalogue | cache de disponibilité (`AvailabilityCache`) |
+
+`tmdbcache` n'est **pas** fusionnée document par document : le plus récent `u` gagnerait
+le fragment entier et perdrait les entrées que deux appareils ajoutent en même temps.
+Le client lit le fragment, fusionne **entrée par entrée** (`timestamp` le plus récent
+gagne, les clés d'une ancienne génération sont abandonnées), puis écrit avec `If-Match` ;
+sur 409 il repart de la version gagnante. Un fragment dépassant ~150 Kio de JSON perd
+ses entrées les plus anciennes (plafond de 256 Kio par document). La clé d'un fragment
+est `FNV-1a 32 bits(clé de cache) mod 128`. Un client qui ne comprend pas `v` ne touche
+pas au fragment.
 
 `type` ∈ `channel|movie|series`. `id` est l'identifiant du contenu chez la source
 (entier chez Flutter, chaîne chez tvOS : sérialisé en texte). Les épisodes sont
@@ -150,11 +160,15 @@ documents et 64 Mio par groupe, 256 Kio par document, 120 écritures/min/apparei
 | Donnée | Firebase (existant) | Web3C / serveur perso |
 |---|---|---|
 | Positions de reprise, notes perso | oui (format actuel, **non chiffré**) | oui |
-| Profils, favoris, listes, ordre, sources, réglages | **non** | oui |
-| Tombstones / suppressions | non | oui |
-| Chiffrement de bout en bout | non | oui |
+| Profils | oui (nom, avatar, **en clair**) | oui |
+| Sources (identifiants compris) | oui, **chiffrées** de bout en bout (clé de groupe) | oui |
+| Titre et affiche de ce qui a été regardé (« Reprendre », « Vus récemment ») | oui, chiffrés (`watchmeta`) | oui (dans `progress`) |
+| Cache TMDB partagé (`tmdbcache`) | oui, chiffré (`groups/{gid}/tmdbCache`) | oui |
+| Favoris, listes, ordre des chaînes, réglages | **non** | oui |
+| Tombstones / suppressions | non (profils et sources : marqueur `deleted`) | oui |
+| Chiffrement de bout en bout | partiel (sources, `watchmeta`, cache TMDB) | oui, tout |
 | Notes communautaires | `ratings` (hérité) | **toujours** `sync-iptv.web3c.cc`, pour tous |
 
-Firebase conserve son périmètre actuel : l'étendre à la couverture complète
-obligerait à écrire en clair, chez un tiers, des identifiants de sources.
-L'interface le signale par `supportsFullSync`.
+Firebase garde un périmètre plus étroit que Web3C (ni favoris, ni listes, ni
+réglages) ; les identifiants de sources n'y transitent que chiffrés. L'interface le
+signale par `supportsFullSync`.
