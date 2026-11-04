@@ -1,7 +1,14 @@
 # syntax=docker/dockerfile:1
 # Compilation croisée native (pas d'émulation) : l'image se construit pour
 # linux/amd64 et linux/arm64 depuis n'importe quelle machine.
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
+#
+# BUILDPLATFORM, TARGETOS et TARGETARCH sont remplis par BuildKit. Un constructeur
+# classique (le module Ansible docker_image, `DOCKER_BUILDKIT=0`) ne les renseigne
+# pas : `FROM --platform=` recevrait alors une chaîne vide et la construction
+# échouerait. Les déclarer ici les rend passables par `--build-arg`, et le repli
+# amd64 ne sert que si personne ne les fournit (GOARCH vide = architecture native).
+ARG BUILDPLATFORM
+FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.22-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
